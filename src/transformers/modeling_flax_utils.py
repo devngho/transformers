@@ -1288,3 +1288,37 @@ def append_replace_return_docstrings(model_class, output_type, config_class):
         output_type=output_type,
         config_class=config_class,
     )(model_class.__call__)
+
+def prepare_flax_attention_from_position_ids(position_ids: jnp.ndarray) -> jnp.ndarray:
+    """
+    Creates a combined attention mask that enforces both causal masking and segmentation constraints.
+
+    The mask allows each token to attend only to the tokens within its own segment and
+    to the tokens preceding it within the same segment. This is used in models where the
+    sequence consists of multiple segments, and each segment's tokens should only attend to
+    tokens within that segment and the past tokens in the causal manner.
+
+    Arguments:
+        position_ids (`jnp.ndarray`):
+            An array of shape (batch_size, seq_length). Each element represents a position
+            in the sequence, where `0` indicates the start of a new segment.
+
+    Returns:
+        `jnp.ndarray`:
+            A combined attention mask of shape (batch_size, 1, seq_length, seq_length).
+            The mask has values of 1 where tokens are allowed to attend to each other
+            and 0 where they are not. The mask is broadcasted to have a shape suitable
+            for attention mechanisms.
+    """
+    batch_size, seq_length = position_ids.shape
+    causal_mask = jnp.tril(jnp.ones((seq_length, seq_length)))
+
+    segment_mask = jnp.cumsum(position_ids == 0, axis=1)[:, None, :]
+    segment_mask = jnp.equal(segment_mask, segment_mask.transpose(0, 2, 1))
+
+    combined_mask = jnp.logical_and(segment_mask, causal_mask)
+    combined_mask = jnp.expand_dims(combined_mask, 1)
+    combined_mask = jnp.broadcast_to(combined_mask, (batch_size, 1, seq_length, seq_length))
+    combined_mask = combined_mask.astype(jnp.float32)
+
+    return combined_mask

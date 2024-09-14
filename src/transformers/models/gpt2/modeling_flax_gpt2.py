@@ -28,7 +28,8 @@ from ...modeling_flax_outputs import (
     FlaxBaseModelOutputWithPastAndCrossAttentions,
     FlaxCausalLMOutputWithCrossAttentions,
 )
-from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
+from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, \
+    prepare_flax_attention_from_position_ids
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_gpt2 import GPT2Config
 
@@ -231,7 +232,9 @@ class FlaxGPT2Attention(nn.Module):
             causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
 
         # combine masks if needed
-        if attention_mask is not None and self.causal:
+        if jnp.ndim(attention_mask) == 4:
+            pass
+        elif attention_mask is not None and self.causal:
             attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
             attention_mask = combine_masks(attention_mask, causal_mask)
         elif self.causal:
@@ -257,6 +260,8 @@ class FlaxGPT2Attention(nn.Module):
             )
         else:
             attention_bias = None
+
+        print(attention_mask)
 
         # usual dot product attention
         attn_weights = dot_product_attention_weights(
@@ -481,14 +486,16 @@ class FlaxGPT2PreTrainedModel(FlaxPreTrainedModel):
 
         batch_size, sequence_length = input_ids.shape
 
+        if attention_mask is None and position_ids is None:
+            attention_mask = jnp.ones((batch_size, sequence_length))
+        elif position_ids is not None:
+            attention_mask = prepare_flax_attention_from_position_ids(position_ids)
+
         if position_ids is None:
             if past_key_values is not None:
                 raise ValueError("Make sure to provide `position_ids` when passing `past_key_values`.")
 
             position_ids = jnp.broadcast_to(jnp.arange(sequence_length)[None, :], (batch_size, sequence_length))
-
-        if attention_mask is None:
-            attention_mask = jnp.ones((batch_size, sequence_length))
 
         # Handle any PRNG if needed
         rngs = {}

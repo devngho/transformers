@@ -32,7 +32,8 @@ from ...modeling_flax_outputs import (
     FlaxCausalLMOutput,
     FlaxCausalLMOutputWithCrossAttentions,
 )
-from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, logging
+from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, logging, \
+    prepare_flax_attention_from_position_ids
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward
 from .configuration_mistral import MistralConfig
 
@@ -310,10 +311,12 @@ class FlaxMistralAttention(nn.Module):
         else:
             causal_mask = self.causal_mask[:, :, :query_length, :key_length]
 
-        batch_size = hidden_states.shape[0]
-        causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
-        attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
-        attention_mask = combine_masks(attention_mask, causal_mask)
+        if jnp.ndim(attention_mask) != 4:
+            batch_size = hidden_states.shape[0]
+            causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
+
+            attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
+            attention_mask = combine_masks(attention_mask, causal_mask)
 
         if self.has_variable("cache", "cached_key") or init_cache:
             key_states, value_states, attention_mask = self._concatenate_to_cache(
@@ -477,14 +480,16 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
 
         batch_size, sequence_length = input_ids.shape
 
+        if attention_mask is None and position_ids is None:
+            attention_mask = jnp.ones((batch_size, sequence_length))
+        elif position_ids is not None:
+            attention_mask = prepare_flax_attention_from_position_ids(position_ids)
+
         if position_ids is None:
             if past_key_values is not None:
                 raise ValueError("Make sure to provide `position_ids` when passing `past_key_values`.")
 
             position_ids = jnp.broadcast_to(jnp.arange(sequence_length)[None, :], (batch_size, sequence_length))
-
-        if attention_mask is None:
-            attention_mask = jnp.ones((batch_size, sequence_length))
 
         # Handle any PRNG if needed
         rngs = {}
