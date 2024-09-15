@@ -282,7 +282,7 @@ class FlaxGPT2Attention(nn.Module):
                 key,
                 value,
                 segment_ids=prepare_segment_ids_from_position_ids(position_ids),
-                casual=self.causal
+                causal=self.causal
             )
 
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
