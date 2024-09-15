@@ -280,42 +280,46 @@ class FlaxLlamaAttention(nn.Module):
 
         query_length, key_length = query.shape[1], key.shape[1]
 
-        if not use_flash_attention:
-            if self.has_variable("cache", "cached_key"):
-                mask_shift = self.variables["cache"]["cache_index"]
-                max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
-                causal_mask = lax.dynamic_slice(
-                    self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
-                )
-            else:
-                causal_mask = self.causal_mask[:, :, :query_length, :key_length]
+        if self.has_variable("cache", "cached_key"):
+            mask_shift = self.variables["cache"]["cache_index"]
+            max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
+            causal_mask = lax.dynamic_slice(
+                self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+            )
+        else:
+            causal_mask = self.causal_mask[:, :, :query_length, :key_length]
 
-            if jnp.ndim(attention_mask) != 4:
-                batch_size = hidden_states.shape[0]
-                causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
+        if jnp.ndim(attention_mask) != 4:
+            batch_size = hidden_states.shape[0]
+            causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
 
-                attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
-                attention_mask = combine_masks(attention_mask, causal_mask)
+            attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
+            attention_mask = combine_masks(attention_mask, causal_mask)
 
-            dropout_rng = None
-            if not deterministic and self.config.attention_dropout > 0.0:
-                dropout_rng = self.make_rng("dropout")
+        dropout_rng = None
+        if not deterministic and self.config.attention_dropout > 0.0:
+            dropout_rng = self.make_rng("dropout")
 
-            # During fast autoregressive decoding, we feed one position at a time,
-            # and cache the keys and values step by step.
-            if self.has_variable("cache", "cached_key") or init_cache:
-                key, value, attention_mask = self._concatenate_to_cache(key, value, query, attention_mask)
+        # During fast autoregressive decoding, we feed one position at a time,
+        # and cache the keys and values step by step.
+        if self.has_variable("cache", "cached_key") or init_cache:
+            key, value, attention_mask = self._concatenate_to_cache(key, value, query, attention_mask)
 
-            key = jnp.repeat(key, self.num_key_value_groups, axis=2)
-            value = jnp.repeat(value, self.num_key_value_groups, axis=2)
+        key = jnp.repeat(key, self.num_key_value_groups, axis=2)
+        value = jnp.repeat(value, self.num_key_value_groups, axis=2)
 
-            # transform boolean mask into float mask
-            attention_bias = lax.select(
-                attention_mask > 0,
-                jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-                jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
+        # transform boolean mask into float mask
+        attention_bias = lax.select(
+            attention_mask > 0,
+            jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
+            jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
             )
 
+        bsz = attention_bias.shape[0]
+
+        attention_bias = jnp.broadcast_to(attention_bias, (bsz, query.shape[2], query_length, key_length))
+
+        if not use_flash_attention:
             # usual dot product attention
             attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
             attn_weights = dot_product_attention_weights(
@@ -327,20 +331,23 @@ class FlaxLlamaAttention(nn.Module):
                 deterministic=deterministic,
                 dtype=attention_dtype,
             )
+            attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
+            query_fa, key_fa, value_fa = jnp.transpose(query, (0, 2, 1, 3)), jnp.transpose(key, (0, 2, 1, 3)), jnp.transpose(value, (0, 2, 1, 3))
             attn_weights = flash_attention(
-                query,
-                key,
-                value,
+                query_fa,
+                key_fa,
+                value_fa,
+                ab=attention_bias,
                 segment_ids=SegmentIds(segment_ids, segment_ids),
                 causal=self.causal
             )
+            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
 
         if self.attention_softmax_in_fp32:
             attn_weights = attn_weights.astype(self.dtype)
 
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)
 
