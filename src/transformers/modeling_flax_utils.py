@@ -1323,21 +1323,27 @@ def prepare_flax_attention_from_position_ids(position_ids: jnp.ndarray) -> jnp.n
 
     return combined_mask
 
-def prepare_segment_ids_from_position_ids(position_ids: jnp.ndarray) -> jnp.ndarray:
+def convert_position_ids_to_segment_ids_jax(position_ids: jnp.ndarray) -> jnp.ndarray:
     """
-    Converts position_ids to segment_ids using JAX operations. Each contiguous sequence of non-zero
+    Converts 2D position_ids to segment_ids using JAX operations. Each contiguous sequence of non-zero
     position IDs starting with 0 will be converted into a unique segment index.
 
     Args:
-        position_ids: Array of shape [seq_length] containing position IDs.
+        position_ids: Array of shape [batch_size, seq_length] containing position IDs.
 
     Returns:
-        segment_ids: Array of shape [seq_length] containing segment IDs.
+        segment_ids: Array of shape [batch_size, seq_length] containing segment IDs.
     """
-    # Create an array indicating where new segments start
-    is_new_segment = jnp.where((position_ids == 0) & (jnp.concatenate([jnp.array([True]), position_ids[:-1] != 0])), 1, 0)
+    position_ids = position_ids.astype(int)
 
-    # Cumulatively sum to assign segment indices
-    segment_ids = jnp.cumsum(is_new_segment) - 1  # subtract 1 to start from 0
+    # Create an array indicating where new segments start in each sequence of the batch
+    is_new_segment = jnp.where(
+        (position_ids == 0) & (jnp.concatenate([jnp.ones((position_ids.shape[0], 1), dtype=bool), position_ids[:, :-1] != 0], axis=1)),
+        1,
+        0
+    )
+
+    # Cumulatively sum to assign segment indices in each sequence of the batch
+    segment_ids = jnp.cumsum(is_new_segment, axis=1) - 1  # Subtract 1 to start from 0
 
     return segment_ids
