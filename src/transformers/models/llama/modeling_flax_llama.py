@@ -35,7 +35,7 @@ from jax import lax
 from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, \
     prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
+from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_llama import LlamaConfig
 
@@ -328,11 +328,12 @@ class FlaxLlamaAttention(nn.Module):
                 dtype=attention_dtype,
             )
         else:
+            segment_ids = prepare_segment_ids_from_position_ids(position_ids)
             attn_weights = flash_attention(
                 query,
                 key,
                 value,
-                segment_ids=prepare_segment_ids_from_position_ids(position_ids),
+                segment_ids=SegmentIds(segment_ids, segment_ids),
                 causal=self.causal
             )
 
