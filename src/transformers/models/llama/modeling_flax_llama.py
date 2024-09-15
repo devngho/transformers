@@ -34,7 +34,8 @@ from jax import lax
 
 from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, \
-    prepare_flax_attention_from_position_ids
+    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
+from jax.experimental.pallas.ops.tpu import flash_attention
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_llama import LlamaConfig
 
@@ -265,6 +266,7 @@ class FlaxLlamaAttention(nn.Module):
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
+        use_flash_attention: bool = True,
     ):
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
@@ -278,52 +280,61 @@ class FlaxLlamaAttention(nn.Module):
 
         query_length, key_length = query.shape[1], key.shape[1]
 
-        if self.has_variable("cache", "cached_key"):
-            mask_shift = self.variables["cache"]["cache_index"]
-            max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
-            causal_mask = lax.dynamic_slice(
-                self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+        if not use_flash_attention:
+            if self.has_variable("cache", "cached_key"):
+                mask_shift = self.variables["cache"]["cache_index"]
+                max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
+                causal_mask = lax.dynamic_slice(
+                    self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+                )
+            else:
+                causal_mask = self.causal_mask[:, :, :query_length, :key_length]
+
+            if jnp.ndim(attention_mask) != 4:
+                batch_size = hidden_states.shape[0]
+                causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
+
+                attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
+                attention_mask = combine_masks(attention_mask, causal_mask)
+
+            dropout_rng = None
+            if not deterministic and self.config.attention_dropout > 0.0:
+                dropout_rng = self.make_rng("dropout")
+
+            # During fast autoregressive decoding, we feed one position at a time,
+            # and cache the keys and values step by step.
+            if self.has_variable("cache", "cached_key") or init_cache:
+                key, value, attention_mask = self._concatenate_to_cache(key, value, query, attention_mask)
+
+            key = jnp.repeat(key, self.num_key_value_groups, axis=2)
+            value = jnp.repeat(value, self.num_key_value_groups, axis=2)
+
+            # transform boolean mask into float mask
+            attention_bias = lax.select(
+                attention_mask > 0,
+                jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
+                jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
+            )
+
+            # usual dot product attention
+            attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
+            attn_weights = dot_product_attention_weights(
+                query,
+                key,
+                bias=attention_bias,
+                dropout_rng=dropout_rng,
+                dropout_rate=self.config.attention_dropout,
+                deterministic=deterministic,
+                dtype=attention_dtype,
             )
         else:
-            causal_mask = self.causal_mask[:, :, :query_length, :key_length]
-
-        if jnp.ndim(attention_mask) != 4:
-            batch_size = hidden_states.shape[0]
-            causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
-
-            attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
-            attention_mask = combine_masks(attention_mask, causal_mask)
-
-        dropout_rng = None
-        if not deterministic and self.config.attention_dropout > 0.0:
-            dropout_rng = self.make_rng("dropout")
-
-        # During fast autoregressive decoding, we feed one position at a time,
-        # and cache the keys and values step by step.
-        if self.has_variable("cache", "cached_key") or init_cache:
-            key, value, attention_mask = self._concatenate_to_cache(key, value, query, attention_mask)
-
-        key = jnp.repeat(key, self.num_key_value_groups, axis=2)
-        value = jnp.repeat(value, self.num_key_value_groups, axis=2)
-
-        # transform boolean mask into float mask
-        attention_bias = lax.select(
-            attention_mask > 0,
-            jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-            jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
-        )
-
-        # usual dot product attention
-        attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
-        attn_weights = dot_product_attention_weights(
-            query,
-            key,
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.config.attention_dropout,
-            deterministic=deterministic,
-            dtype=attention_dtype,
-        )
+            attn_weights = flash_attention(
+                query,
+                key,
+                value,
+                segment_ids=prepare_segment_ids_from_position_ids(position_ids),
+                casual=self.causal
+            )
 
         if self.attention_softmax_in_fp32:
             attn_weights = attn_weights.astype(self.dtype)
