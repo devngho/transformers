@@ -1323,7 +1323,7 @@ def prepare_flax_attention_from_position_ids(position_ids: jnp.ndarray) -> jnp.n
 
     return combined_mask
 
-def convert_position_ids_to_segment_ids_jax(position_ids: jnp.ndarray) -> jnp.ndarray:
+def prepare_segment_ids_from_position_ids(position_ids: jnp.ndarray) -> jnp.ndarray:
     """
     Converts 2D position_ids to segment_ids using JAX operations. Each contiguous sequence of non-zero
     position IDs starting with 0 will be converted into a unique segment index.
