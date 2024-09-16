@@ -226,7 +226,7 @@ class FlaxMistralAttention(nn.Module):
         config = self.config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
@@ -241,11 +241,7 @@ class FlaxMistralAttention(nn.Module):
         self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
-        casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
-        if config.sliding_window is not None:
-            self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
-        else:
-            self.causal_mask = casual_mask
+
         self.rotary_emb = FlaxMistralRotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
@@ -307,16 +303,24 @@ class FlaxMistralAttention(nn.Module):
 
         key_states, query_states = self.rotary_emb(key_states, query_states, position_ids)
         query_length, key_length = query_states.shape[1], key_states.shape[1]
-        if self.has_variable("cache", "cached_key"):
-            mask_shift = self.variables["cache"]["cache_index"]
-            max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
-            causal_mask = lax.dynamic_slice(
-                self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
-            )
-        else:
-            causal_mask = self.causal_mask[:, :, :query_length, :key_length]
 
         if jnp.ndim(attention_mask) != 4:
+            casual_mask = make_causal_mask(jnp.ones((1, key_length), dtype="bool"), dtype="bool")
+
+            if self.config.sliding_window is not None:
+                causal_mask = jnp.triu(casual_mask, k=-self.config.sliding_window)
+            else:
+                causal_mask = casual_mask
+
+            if self.has_variable("cache", "cached_key"):
+                mask_shift = self.variables["cache"]["cache_index"]
+                max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
+                causal_mask = lax.dynamic_slice(
+                    causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+                )
+            else:
+                causal_mask = causal_mask[:, :, :query_length, :key_length]
+
             batch_size = hidden_states.shape[0]
             causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
 
@@ -327,6 +331,7 @@ class FlaxMistralAttention(nn.Module):
             key_states, value_states, attention_mask = self._concatenate_to_cache(
                 key_states, value_states, query_states, attention_mask
             )
+
         key_states = jnp.repeat(key_states, self.num_key_value_groups, axis=2)
         value_states = jnp.repeat(value_states, self.num_key_value_groups, axis=2)
 
