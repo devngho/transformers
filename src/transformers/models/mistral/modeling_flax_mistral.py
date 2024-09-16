@@ -242,7 +242,10 @@ class FlaxMistralAttention(nn.Module):
         self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
         casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
-        self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
+        if config.sliding_window is not None:
+            self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
+        else:
+            self.causal_mask = casual_mask
         self.rotary_emb = FlaxMistralRotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
