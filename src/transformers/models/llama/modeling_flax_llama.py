@@ -331,6 +331,10 @@ class FlaxLlamaAttention(nn.Module):
                 deterministic=deterministic,
                 dtype=attention_dtype,
             )
+
+            if self.attention_softmax_in_fp32:
+                attn_weights = attn_weights.astype(self.dtype)
+
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
@@ -345,8 +349,6 @@ class FlaxLlamaAttention(nn.Module):
             )
             attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
 
-        if self.attention_softmax_in_fp32:
-            attn_weights = attn_weights.astype(self.dtype)
 
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)

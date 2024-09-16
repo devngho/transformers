@@ -2,6 +2,7 @@
 
 - Flax 4d attention mask for correct packing
 - TPU flash attention
+- Supported models: GPT2, Llama, Mistral
 
 ### Notice
 

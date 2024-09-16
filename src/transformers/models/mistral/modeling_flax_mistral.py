@@ -33,7 +33,8 @@ from ...modeling_flax_outputs import (
     FlaxCausalLMOutputWithCrossAttentions,
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, logging, \
-    prepare_flax_attention_from_position_ids
+    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
+from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward
 from .configuration_mistral import MistralConfig
 
@@ -291,6 +292,7 @@ class FlaxMistralAttention(nn.Module):
         deterministic: bool = True,
         output_attentions: bool = False,
         init_cache: bool = False,
+        use_flash_attention: bool = True,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -331,21 +333,39 @@ class FlaxMistralAttention(nn.Module):
             jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
         )
 
-        # usual dot product attention
-        attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
-        attn_weights = dot_product_attention_weights(
-            query_states,
-            key_states,
-            bias=attention_bias,
-            deterministic=deterministic,
-            dropout_rate=self.config.attention_dropout,
-            dtype=attention_dtype,
-        )
+        bsz = attention_bias.shape[0]
 
-        if self.attention_softmax_in_fp32:
-            attn_weights = attn_weights.astype(self.dtype)
+        attention_bias = jnp.broadcast_to(attention_bias, (bsz, query_states.shape[2], query_length, key_length))
 
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+        if not use_flash_attention:
+            # usual dot product attention
+            attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
+            attn_weights = dot_product_attention_weights(
+                query_states,
+                key_states,
+                bias=attention_bias,
+                deterministic=deterministic,
+                dropout_rate=self.config.attention_dropout,
+                dtype=attention_dtype,
+            )
+
+            if self.attention_softmax_in_fp32:
+                attn_weights = attn_weights.astype(self.dtype)
+
+            attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+        else:
+            segment_ids = prepare_segment_ids_from_position_ids(position_ids)
+            query_fa, key_fa, value_fa = jnp.transpose(query_states, (0, 2, 1, 3)), jnp.transpose(key_states, (0, 2, 1, 3)), jnp.transpose(value_states, (0, 2, 1, 3))
+            attn_weights = flash_attention(
+                query_fa,
+                key_fa,
+                value_fa,
+                ab=attention_bias,
+                segment_ids=SegmentIds(segment_ids, segment_ids),
+                causal=self.causal
+            )
+            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)
 
