@@ -155,7 +155,7 @@ class FlaxMistralRotaryEmbedding(nn.Module):
 
     def setup(self):
         head_dim = self.config.hidden_size // self.config.num_attention_heads
-        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
+        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, self.config.rope_theta, head_dim)
 
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
@@ -200,8 +200,8 @@ def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
 
 
 # Copied from transformers.models.llama.modeling_flax_llama.create_sinusoidal_positions
-def create_sinusoidal_positions(num_pos, dim):
-    inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))
+def create_sinusoidal_positions(num_pos, base, dim):
+    inv_freq = 1.0 / (base ** (np.arange(0, dim, 2) / dim))
     freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
 
     emb = np.concatenate((freqs, freqs), axis=-1)
