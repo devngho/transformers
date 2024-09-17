@@ -1189,6 +1189,13 @@ def is_liger_kernel_available():
 
     return version.parse(importlib.metadata.version("liger_kernel")) >= version.parse("0.1.0")
 
+def is_jax_tpu_available():
+    if not _jax_available: return False
+
+    import jax
+
+    return jax.devices()[0].platform == 'tpu'
+
 
 # docstyle-ignore
 AV_IMPORT_ERROR = """

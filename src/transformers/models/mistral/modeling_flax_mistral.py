@@ -26,6 +26,7 @@ from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
+from ... import FLAX_ROPE_INIT_FUNCTIONS
 from ...modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPast,
@@ -34,7 +35,11 @@ from ...modeling_flax_outputs import (
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, logging, \
     prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
+from ...utils.import_utils import is_jax_tpu_available
+
+if is_jax_tpu_available():
+    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
+
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward
 from .configuration_mistral import MistralConfig
 
@@ -154,15 +159,60 @@ class FlaxMistralRotaryEmbedding(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        head_dim = self.config.hidden_size // self.config.num_attention_heads
-        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, self.config.rope_theta, head_dim)
+        self.rope_kwargs = {}
+
+        if self.config.rope_scaling is not None:
+            self.rope_type = self.config.rope_scaling.get("rope_type", self.config.rope_scaling.get("type"))
+        else:
+            self.rope_type = "default"
+        self.max_seq_len_cached = self.config.max_position_embeddings
+        self.original_max_seq_len = self.config.max_position_embeddings
+
+        self.rope_init_fn = FLAX_ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        self.inv_freq, self.attention_scaling = self.rope_init_fn(self.config, **self.rope_kwargs)
+
+        self.original_inv_freq = self.inv_freq
+
+    def _dynamic_frequency_update(self, position_ids):
+        """
+        dynamic RoPE layers should recompute `inv_freq` in the following situations:
+        1 - growing beyond the cached sequence length (allow scaling)
+        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
+        """
+        seq_len = jnp.max(position_ids) + 1
+        if seq_len > self.max_seq_len_cached:  # growth
+            inv_freq, self.attention_scaling = self.rope_init_fn(
+                self.config, seq_len=seq_len, **self.rope_kwargs
+            )
+            self.inv_freq = inv_freq
+            self.max_seq_len_cached = seq_len
+
+        if seq_len < self.original_max_seq_len < self.max_seq_len_cached:  # reset
+            self.inv_freq = self.original_inv_freq
+            self.max_seq_len_cached = self.original_max_seq_len
 
     def __call__(self, key, query, position_ids):
-        sincos = self.sincos[position_ids]
-        sin_pos, cos_pos = jnp.split(sincos, 2, axis=-1)
+        if "dynamic" in self.rope_type:
+            self._dynamic_frequency_update(position_ids)
 
-        key = apply_rotary_pos_emb(key, sin_pos, cos_pos)
-        query = apply_rotary_pos_emb(query, sin_pos, cos_pos)
+        # Core RoPE block
+        _inv_freq = self.inv_freq[None, :, None].astype(jnp.float32)
+        inv_freq_expanded = jnp.broadcast_to(_inv_freq, (position_ids.shape[0], _inv_freq.shape[1], 1))
+        position_ids_expanded = position_ids[:, None, :].astype(jnp.float32)
+        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        freqs = jnp.transpose(jnp.matmul(inv_freq_expanded, position_ids_expanded, precision=jax.lax.Precision.HIGHEST), (0, 2, 1))
+        emb = jnp.concatenate((freqs, freqs), axis=-1)
+
+        cos = jnp.cos(emb)
+        sin = jnp.sin(emb)
+
+        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+
+        key = apply_rotary_pos_emb(key, sin, cos)
+        query = apply_rotary_pos_emb(query, sin, cos)
 
         key = jnp.asarray(key, dtype=self.dtype)
         query = jnp.asarray(query, dtype=self.dtype)
@@ -199,16 +249,6 @@ def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
     return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.create_sinusoidal_positions
-def create_sinusoidal_positions(num_pos, base, dim):
-    inv_freq = 1.0 / (base ** (np.arange(0, dim, 2) / dim))
-    freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
-
-    emb = np.concatenate((freqs, freqs), axis=-1)
-    out = np.concatenate((np.sin(emb)[:, None, :], np.cos(emb)[:, None, :]), axis=-1)
-    return jnp.array(out[:, :, :num_pos])
-
-
 # Copied from transformers.models.llama.modeling_flax_llama.rotate_half
 def rotate_half(tensor):
     """Rotates half the hidden dims of the input."""
@@ -239,12 +279,6 @@ class FlaxMistralAttention(nn.Module):
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
 
         self.rotary_emb = FlaxMistralRotaryEmbedding(config, dtype=self.dtype)
-
-    def _split_heads(self, hidden_states, num_heads):
-        return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
-
-    def _merge_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.hidden_size,))
 
     @nn.compact
     # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoSelfAttention._concatenate_to_cache
@@ -287,15 +321,15 @@ class FlaxMistralAttention(nn.Module):
         deterministic: bool = True,
         output_attentions: bool = False,
         init_cache: bool = False,
-        use_flash_attention: bool = True,
+        use_flash_attention: bool = is_jax_tpu_available(),
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = self._split_heads(query_states, self.num_heads)
-        key_states = self._split_heads(key_states, self.num_key_value_heads)
-        value_states = self._split_heads(value_states, self.num_key_value_heads)
+        query_states = jnp.reshape(query_states, query_states.shape[:2] + (self.num_heads, self.head_dim))
+        key_states = jnp.reshape(key_states, key_states.shape[:2] + (self.num_key_value_heads, self.head_dim))
+        value_states = jnp.reshape(value_states, value_states.shape[:2] + (self.num_key_value_heads, self.head_dim))
 
         key_states, query_states = self.rotary_emb(key_states, query_states, position_ids)
         query_length, key_length = query_states.shape[1], key_states.shape[1]
@@ -355,7 +389,6 @@ class FlaxMistralAttention(nn.Module):
 
             if self.attention_softmax_in_fp32:
                 attn_weights = attn_weights.astype(self.dtype)
-
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
@@ -370,7 +403,7 @@ class FlaxMistralAttention(nn.Module):
             )
             attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
 
-        attn_output = self._merge_heads(attn_output)
+        attn_output = jnp.reshape(attn_output, attn_output.shape[:2] + (self.num_heads * self.head_dim,))
         attn_output = self.o_proj(attn_output)
 
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)

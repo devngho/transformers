@@ -1,8 +1,17 @@
-## flax-4d-attention
+## branch: flax-4d-attention
 
-- Flax 4d attention mask for correct packing
+> [!WARNING]
+> It's very **experimental**. Be careful!
+
+HF's missing flax support
+
+### Main feature
+
+- Flax 4d attention mask for correct packing (by position_ids or directly providing mask)
 - TPU flash attention
 - Supported models: GPT2, Llama, Mistral
+- RoPE correction for flax (longrope...)
+- lazy causal mask to prevent oom
 
 ### Notice
 
