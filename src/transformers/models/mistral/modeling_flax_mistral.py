@@ -161,10 +161,7 @@ class FlaxMistralRotaryEmbedding(nn.Module):
     def setup(self):
         self.rope_kwargs = {}
 
-        if self.config.rope_scaling is not None:
-            self.rope_type = self.config.rope_scaling.get("rope_type", self.config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
+        self.rope_type = "default"
         self.max_seq_len_cached = self.config.max_position_embeddings
         self.original_max_seq_len = self.config.max_position_embeddings
 
