@@ -397,8 +397,7 @@ class FlaxMistralAttention(nn.Module):
                 key_fa,
                 value_fa,
                 ab=attention_bias,
-                segment_ids=SegmentIds(segment_ids, segment_ids),
-                causal=self.causal
+                segment_ids=SegmentIds(segment_ids, segment_ids)
             )
             attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
 
