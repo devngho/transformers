@@ -242,8 +242,10 @@ class FlaxMistralMLP(nn.Module):
 
 
 # Copied from transformers.models.llama.modeling_flax_llama.apply_rotary_pos_emb
-def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
-    return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
+def apply_rotary_pos_emb(tensor, sin_pos, cos_pos, unsqueeze_dim=2):
+    cos = jnp.expand_dims(cos_pos, unsqueeze_dim)
+    sin = jnp.expand_dims(sin_pos, unsqueeze_dim)
+    return (tensor * cos) + (rotate_half(tensor) * sin)
 
 
 # Copied from transformers.models.llama.modeling_flax_llama.rotate_half
