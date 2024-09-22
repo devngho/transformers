@@ -482,7 +482,7 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
-        random_params = jax.jit(self.module.init, backend='cpu')(rngs, input_ids, attention_mask, position_ids, return_dict=False)["params"]
+        random_params = jax.jit(self.module.init, backend='cpu', static_argnames=['return_dict'])(rngs, input_ids, attention_mask, position_ids, return_dict=False)["params"]
 
         if params is not None:
             random_params = flatten_dict(unfreeze(random_params))
