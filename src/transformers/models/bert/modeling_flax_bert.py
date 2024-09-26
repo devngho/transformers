@@ -44,14 +44,12 @@ from ...modeling_flax_utils import (
     FlaxPreTrainedModel,
     append_call_sample_docstring,
     append_replace_return_docstrings,
-    overwrite_call_docstring,
+    overwrite_call_docstring, tpu_flash_attention, prepare_segment_ids_from_position_ids, BATCH, LENGTH, EMBED, KV_HEAD,
+    KV_HEAD_DIM,
 )
 from ...utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_bert import BertConfig
 from ...utils.import_utils import is_jax_tpu_available
-
-if is_jax_tpu_available():
-    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 
 
 logger = logging.get_logger(__name__)
@@ -300,6 +298,7 @@ class FlaxBertSelfAttention(nn.Module):
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         key_value_states: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
         deterministic=True,
@@ -322,6 +321,10 @@ class FlaxBertSelfAttention(nn.Module):
             # self_attention
             key_states = self.key(hidden_states)
             value_states = self.value(hidden_states)
+
+        query_states = nn.with_logical_constraint(query_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        key_states = nn.with_logical_constraint(key_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        value_states = nn.with_logical_constraint(value_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
 
         query_states = self._split_heads(query_states)
         key_states = self._split_heads(key_states)
@@ -395,15 +398,15 @@ class FlaxBertSelfAttention(nn.Module):
 
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
         else:
-            query_fa, key_fa, value_fa = jnp.transpose(query_states, (0, 2, 1, 3)), jnp.transpose(key_states, (0, 2, 1, 3)), jnp.transpose(value_states, (0, 2, 1, 3))
-            attn_weights = flash_attention(
-                query_fa,
-                key_fa,
-                value_fa,
-                ab=attention_bias,
-                causal=self.causal
+            segment_ids = prepare_segment_ids_from_position_ids(position_ids)
+            attn_weights = tpu_flash_attention(
+                self.mesh,
+                query_states,
+                key_states,
+                value_states,
+                decoder_segment_ids=segment_ids
             )
-            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+            attn_output = attn_weights
 
         attn_output = attn_output.reshape(attn_output.shape[:2] + (-1,))
 
@@ -435,9 +438,10 @@ class FlaxBertAttention(nn.Module):
     config: BertConfig
     causal: bool = False
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
-        self.self = FlaxBertSelfAttention(self.config, causal=self.causal, dtype=self.dtype)
+        self.self = FlaxBertSelfAttention(self.config, causal=self.causal, dtype=self.dtype, mesh=self.mesh)
         self.output = FlaxBertSelfOutput(self.config, dtype=self.dtype)
 
     def __call__(
@@ -445,6 +449,7 @@ class FlaxBertAttention(nn.Module):
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         key_value_states=None,
         init_cache=False,
         deterministic=True,
@@ -514,29 +519,33 @@ class FlaxBertOutput(nn.Module):
 class FlaxBertLayer(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
+    mesh: jax.sharding.Mesh
 
     def setup(self):
-        self.attention = FlaxBertAttention(self.config, causal=self.config.is_decoder, dtype=self.dtype)
+        self.attention = FlaxBertAttention(self.config, causal=self.config.is_decoder, dtype=self.dtype, mesh=self.mesh)
         self.intermediate = FlaxBertIntermediate(self.config, dtype=self.dtype)
         self.output = FlaxBertOutput(self.config, dtype=self.dtype)
         if self.config.add_cross_attention:
-            self.crossattention = FlaxBertAttention(self.config, causal=False, dtype=self.dtype)
+            self.crossattention = FlaxBertAttention(self.config, causal=False, dtype=self.dtype, mesh=self.mesh)
 
     def __call__(
         self,
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         encoder_attention_mask: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
         deterministic: bool = True,
         output_attentions: bool = False,
     ):
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
         # Self Attention
         attention_outputs = self.attention(
             hidden_states,
             attention_mask,
+            position_ids=position_ids,
             layer_head_mask=layer_head_mask,
             init_cache=init_cache,
             deterministic=deterministic,
@@ -549,6 +558,7 @@ class FlaxBertLayer(nn.Module):
             cross_attention_outputs = self.crossattention(
                 attention_output,
                 attention_mask=encoder_attention_mask,
+                position_ids=position_ids,
                 layer_head_mask=layer_head_mask,
                 key_value_states=encoder_hidden_states,
                 deterministic=deterministic,
@@ -558,6 +568,7 @@ class FlaxBertLayer(nn.Module):
 
         hidden_states = self.intermediate(attention_output)
         hidden_states = self.output(hidden_states, attention_output, deterministic=deterministic)
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         outputs = (hidden_states,)
 
@@ -572,17 +583,18 @@ class FlaxBertLayerCollection(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         if self.gradient_checkpointing:
             FlaxBertCheckpointLayer = remat(FlaxBertLayer, static_argnums=(5, 6, 7))
             self.layers = [
-                FlaxBertCheckpointLayer(self.config, name=str(i), dtype=self.dtype)
+                FlaxBertCheckpointLayer(self.config, name=str(i), dtype=self.dtype, mesh=self.mesh)
                 for i in range(self.config.num_hidden_layers)
             ]
         else:
             self.layers = [
-                FlaxBertLayer(self.config, name=str(i), dtype=self.dtype) for i in range(self.config.num_hidden_layers)
+                FlaxBertLayer(self.config, name=str(i), dtype=self.dtype, mesh=self.mesh) for i in range(self.config.num_hidden_layers)
             ]
 
     def __call__(
@@ -653,12 +665,14 @@ class FlaxBertEncoder(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.layer = FlaxBertLayerCollection(
             self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
 
     def __call__(
@@ -979,6 +993,7 @@ class FlaxBertModule(nn.Module):
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     add_pooling_layer: bool = True
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.embeddings = FlaxBertEmbeddings(self.config, dtype=self.dtype)
@@ -986,6 +1001,7 @@ class FlaxBertModule(nn.Module):
             self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.pooler = FlaxBertPooler(self.config, dtype=self.dtype)
 
@@ -1060,12 +1076,14 @@ class FlaxBertForPreTrainingModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
             config=self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.cls = FlaxBertPreTrainingHeads(config=self.config, dtype=self.dtype)
 
@@ -1160,6 +1178,7 @@ class FlaxBertForMaskedLMModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1167,6 +1186,7 @@ class FlaxBertForMaskedLMModule(nn.Module):
             add_pooling_layer=False,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.cls = FlaxBertOnlyMLMHead(config=self.config, dtype=self.dtype)
 
@@ -1226,12 +1246,14 @@ class FlaxBertForNextSentencePredictionModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
             config=self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.cls = FlaxBertOnlyNSPHead(dtype=self.dtype)
 
@@ -1318,12 +1340,14 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
             config=self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         classifier_dropout = (
             self.config.classifier_dropout
@@ -1398,12 +1422,14 @@ class FlaxBertForMultipleChoiceModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
             config=self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.dropout = nn.Dropout(rate=self.config.hidden_dropout_prob)
         self.classifier = nn.Dense(1, dtype=self.dtype)
@@ -1478,6 +1504,7 @@ class FlaxBertForTokenClassificationModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1485,6 +1512,7 @@ class FlaxBertForTokenClassificationModule(nn.Module):
             dtype=self.dtype,
             add_pooling_layer=False,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         classifier_dropout = (
             self.config.classifier_dropout
@@ -1553,6 +1581,7 @@ class FlaxBertForQuestionAnsweringModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1560,6 +1589,7 @@ class FlaxBertForQuestionAnsweringModule(nn.Module):
             dtype=self.dtype,
             add_pooling_layer=False,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.qa_outputs = nn.Dense(self.config.num_labels, dtype=self.dtype)
 
@@ -1629,6 +1659,7 @@ class FlaxBertForCausalLMModule(nn.Module):
     config: BertConfig
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1636,6 +1667,7 @@ class FlaxBertForCausalLMModule(nn.Module):
             add_pooling_layer=False,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.cls = FlaxBertOnlyMLMHead(config=self.config, dtype=self.dtype)
 

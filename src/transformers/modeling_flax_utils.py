@@ -56,8 +56,7 @@ from .utils import (
     replace_return_docstrings,
 )
 from .utils.hub import convert_file_size_to_int, get_checkpoint_shard_files
-from .utils.import_utils import is_safetensors_available
-
+from .utils.import_utils import is_safetensors_available, is_jax_tpu_available
 
 if is_safetensors_available():
     from safetensors import safe_open
@@ -1347,3 +1346,99 @@ def prepare_segment_ids_from_position_ids(position_ids: jnp.ndarray) -> jnp.ndar
     segment_ids = jnp.cumsum(is_new_segment, axis=1) - 1  # Subtract 1 to start from 0
 
     return segment_ids
+
+import functools
+from jax.experimental import shard_map
+if is_jax_tpu_available():
+    from jax.sharding import Mesh
+    from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+    from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
+# Copied from maxtext.MaxText.common_types.py
+# Apache 2.0
+
+AxisNames = Tuple[str, ...]
+AxisIdxes = Tuple[int, ...]
+
+BATCH = "activation_batch"
+LENGTH = "activation_length"
+EMBED = "activation_embed"
+HEAD = "activation_heads"
+KV_BATCH = "activation_kv_batch"
+KV_HEAD = "activation_kv_heads"
+KV_HEAD_DIM = "activation_kv_head_dim"
+D_KV = "activation_kv"
+
+# Copied from maxtext.MaxText.layers.attentions.py
+# Apache 2.0
+def tpu_flash_attention(
+        mesh: Mesh,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        decoder_segment_ids: jax.Array | None,
+        attn_logits_soft_cap: Optional[float] = None,
+        sa_block_q: int = 512,
+        sa_block_q_dkv: int = 512,
+        sa_block_q_dq: int = 512
+) -> jax.Array:
+    """TPU Flash Attention."""
+    # Transpose to ('batch', 'heads', 'length', 'kv')
+    query = jnp.transpose(query, axes=(0, 2, 1, 3))
+    key = jnp.transpose(key, axes=(0, 2, 1, 3))
+    value = jnp.transpose(value, axes=(0, 2, 1, 3))
+
+    if decoder_segment_ids is not None:
+        decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
+    axis_names = nn.logical_to_mesh_axes((BATCH, HEAD, LENGTH, D_KV))
+    segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
+
+    @functools.partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+                axis_names,
+                axis_names,
+                axis_names,
+                segment_axis_names,
+        ),
+        out_specs=axis_names,
+        check_rep=False,
+    )
+    def wrap_flash_attention(query, key, value, decoder_segment_ids):
+        if decoder_segment_ids is not None:
+            assert (
+                    query.shape[2] == decoder_segment_ids.q.shape[1]
+            ), "Sharding along sequence dimension not allowed in tpu kernel attention"
+        block_sizes = splash_attention_kernel.BlockSizes(
+            block_q=min(sa_block_q, query.shape[2]),
+            block_kv_compute=min(sa_block_q, key.shape[2]),
+            block_kv=min(sa_block_q, key.shape[2]),
+            block_q_dkv=min(sa_block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(sa_block_q_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(sa_block_q_dkv, query.shape[2]),
+            block_q_dq=min(sa_block_q_dq, query.shape[2]),
+            block_kv_dq=min(sa_block_q_dq, query.shape[2]),
+        )
+
+        mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+
+        # Create multi-head mask
+        multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+        splash_kernel = splash_attention_kernel.make_splash_mha(
+            mask=multi_head_mask,
+            head_shards=1,
+            q_seq_shards=1,
+            block_sizes=block_sizes,
+            attn_logits_soft_cap=attn_logits_soft_cap,
+        )
+
+        return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
+
+    devices_in_data_fsdp = mesh.shape["dp"] * mesh.shape["fsdp"]
+    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
+    )
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids)
+    x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    return x

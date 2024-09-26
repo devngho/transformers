@@ -34,11 +34,9 @@ from ...modeling_flax_outputs import (
     FlaxCausalLMOutputWithCrossAttentions,
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, logging, \
-    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
+    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids, tpu_flash_attention, BATCH, LENGTH, \
+    EMBED, KV_HEAD, KV_HEAD_DIM
 from ...utils.import_utils import is_jax_tpu_available
-
-if is_jax_tpu_available():
-    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward
 from .configuration_mistral import MistralConfig
@@ -260,6 +258,7 @@ def rotate_half(tensor):
 class FlaxMistralAttention(nn.Module):
     config: MistralConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         config = self.config
@@ -330,6 +329,10 @@ class FlaxMistralAttention(nn.Module):
         key_states = jnp.reshape(key_states, key_states.shape[:2] + (self.num_key_value_heads, self.head_dim))
         value_states = jnp.reshape(value_states, value_states.shape[:2] + (self.num_key_value_heads, self.head_dim))
 
+        query_states = nn.with_logical_constraint(query_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        key_states = nn.with_logical_constraint(key_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        value_states = nn.with_logical_constraint(value_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+
         key_states, query_states = self.rotary_emb(key_states, query_states, position_ids)
         query_length, key_length = query_states.shape[1], key_states.shape[1]
 
@@ -391,15 +394,14 @@ class FlaxMistralAttention(nn.Module):
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
-            query_fa, key_fa, value_fa = jnp.transpose(query_states, (0, 2, 1, 3)), jnp.transpose(key_states, (0, 2, 1, 3)), jnp.transpose(value_states, (0, 2, 1, 3))
-            attn_weights = flash_attention(
-                query_fa,
-                key_fa,
-                value_fa,
-                ab=attention_bias,
-                segment_ids=SegmentIds(segment_ids, segment_ids)
+            attn_weights = tpu_flash_attention(
+                self.mesh,
+                query_states,
+                key_states,
+                value_states,
+                decoder_segment_ids=segment_ids
             )
-            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+            attn_output = attn_weights
 
         attn_output = jnp.reshape(attn_output, attn_output.shape[:2] + (self.num_heads * self.head_dim,))
         attn_output = self.o_proj(attn_output)
@@ -412,10 +414,11 @@ class FlaxMistralAttention(nn.Module):
 class FlaxMistralDecoderLayer(nn.Module):
     config: MistralConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.input_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
-        self.self_attn = FlaxMistralAttention(self.config, dtype=self.dtype)
+        self.self_attn = FlaxMistralAttention(self.config, dtype=self.dtype, mesh=self.mesh)
         self.post_attention_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
         self.mlp = FlaxMistralMLP(self.config, dtype=self.dtype)
 
@@ -428,6 +431,8 @@ class FlaxMistralDecoderLayer(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
     ):
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         outputs = self.self_attn(
@@ -438,6 +443,8 @@ class FlaxMistralDecoderLayer(nn.Module):
             init_cache=init_cache,
             output_attentions=output_attentions,
         )
+
+        outputs = nn.with_logical_constraint(outputs, (BATCH, LENGTH, EMBED))
         # residual connection
         attn_output = outputs[0]
         hidden_states = residual + attn_output
@@ -445,8 +452,10 @@ class FlaxMistralDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
         # residual connection
         hidden_states = residual + hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         return (hidden_states,) + outputs[1:]
 
@@ -590,10 +599,11 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
 class FlaxMistralLayerCollection(nn.Module):
     config: MistralConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.blocks = [
-            FlaxMistralDecoderLayer(self.config, dtype=self.dtype, name=str(i))
+            FlaxMistralDecoderLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
             for i in range(self.config.num_hidden_layers)
         ]
 
@@ -637,6 +647,7 @@ class FlaxMistralLayerCollection(nn.Module):
 class FlaxMistralModule(nn.Module):
     config: MistralConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
@@ -647,7 +658,7 @@ class FlaxMistralModule(nn.Module):
             embedding_init=embedding_init,
             dtype=self.dtype,
         )
-        self.layers = FlaxMistralLayerCollection(self.config, dtype=self.dtype)
+        self.layers = FlaxMistralLayerCollection(self.config, dtype=self.dtype, mesh=self.mesh)
         self.norm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
 
     def __call__(
@@ -714,9 +725,10 @@ append_call_sample_docstring(
 class FlaxMistralForCausalLMModule(nn.Module):
     config: MistralConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
-        self.model = FlaxMistralModule(self.config, dtype=self.dtype)
+        self.model = FlaxMistralModule(self.config, dtype=self.dtype, mesh=self.mesh)
         self.lm_head = nn.Dense(
             self.config.vocab_size,
             use_bias=False,

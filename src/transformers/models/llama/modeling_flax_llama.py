@@ -35,11 +35,10 @@ from jax import lax
 from ... import FLAX_ROPE_INIT_FUNCTIONS
 from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, \
-    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
+    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids, tpu_flash_attention, BATCH, EMBED, \
+    LENGTH, KV_HEAD, KV_HEAD_DIM
 from ...utils.import_utils import is_jax_tpu_available
 
-if is_jax_tpu_available():
-    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_llama import LlamaConfig
 
@@ -237,6 +236,7 @@ class FlaxLlamaAttention(nn.Module):
     dtype: jnp.dtype = jnp.float32
     causal: bool = True
     is_cross_attention: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         config = self.config
@@ -314,6 +314,10 @@ class FlaxLlamaAttention(nn.Module):
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
 
+        query = nn.with_logical_constraint(query, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        key = nn.with_logical_constraint(key, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        value = nn.with_logical_constraint(value, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+
         query = self._split_heads(query, self.num_heads)
         key = self._split_heads(key, self.num_key_value_heads)
         value = self._split_heads(value, self.num_key_value_heads)
@@ -382,16 +386,14 @@ class FlaxLlamaAttention(nn.Module):
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
-            query_fa, key_fa, value_fa = jnp.transpose(query, (0, 2, 1, 3)), jnp.transpose(key, (0, 2, 1, 3)), jnp.transpose(value, (0, 2, 1, 3))
-            attn_weights = flash_attention(
-                query_fa,
-                key_fa,
-                value_fa,
-                ab=attention_bias,
-                segment_ids=SegmentIds(segment_ids, segment_ids),
-                causal=self.causal
+            attn_weights = tpu_flash_attention(
+                self.mesh,
+                query,
+                key,
+                value,
+                decoder_segment_ids=segment_ids
             )
-            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+            attn_output = attn_weights
 
 
         attn_output = self._merge_heads(attn_output)
@@ -425,12 +427,13 @@ class FlaxLlamaMLP(nn.Module):
 
 
 class FlaxLlamaDecoderLayer(nn.Module):
+    mesh: jax.sharding.Mesh
     config: LlamaConfig
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.input_layernorm = FlaxLlamaRMSNorm(self.config, dtype=self.dtype)
-        self.self_attn = FlaxLlamaAttention(self.config, dtype=self.dtype)
+        self.self_attn = FlaxLlamaAttention(self.config, dtype=self.dtype, mesh=self.mesh)
         self.post_attention_layernorm = FlaxLlamaRMSNorm(self.config, dtype=self.dtype)
         self.mlp = FlaxLlamaMLP(self.config, dtype=self.dtype)
 
@@ -443,6 +446,8 @@ class FlaxLlamaDecoderLayer(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
     ):
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         outputs = self.self_attn(
@@ -453,6 +458,8 @@ class FlaxLlamaDecoderLayer(nn.Module):
             init_cache=init_cache,
             output_attentions=output_attentions,
         )
+
+        outputs = nn.with_logical_constraint(outputs, (BATCH, LENGTH, EMBED))
         # residual connection
         attn_output = outputs[0]
         hidden_states = residual + attn_output
@@ -460,8 +467,10 @@ class FlaxLlamaDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
         # residual connection
         hidden_states = residual + hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         return (hidden_states,) + outputs[1:]
 
@@ -604,10 +613,11 @@ class FlaxLlamaPreTrainedModel(FlaxPreTrainedModel):
 class FlaxLlamaLayerCollection(nn.Module):
     config: LlamaConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.blocks = [
-            FlaxLlamaDecoderLayer(self.config, dtype=self.dtype, name=str(i))
+            FlaxLlamaDecoderLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
             for i in range(self.config.num_hidden_layers)
         ]
 
@@ -650,6 +660,7 @@ class FlaxLlamaLayerCollection(nn.Module):
 class FlaxLlamaModule(nn.Module):
     config: LlamaConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
@@ -660,7 +671,7 @@ class FlaxLlamaModule(nn.Module):
             embedding_init=embedding_init,
             dtype=self.dtype,
         )
-        self.layers = FlaxLlamaLayerCollection(self.config, dtype=self.dtype)
+        self.layers = FlaxLlamaLayerCollection(self.config, dtype=self.dtype, mesh=self.mesh)
         self.norm = FlaxLlamaRMSNorm(self.config, dtype=self.dtype)
 
     def __call__(
@@ -726,9 +737,10 @@ append_call_sample_docstring(
 class FlaxLlamaForCausalLMModule(nn.Module):
     config: LlamaConfig
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
-        self.model = FlaxLlamaModule(self.config, dtype=self.dtype)
+        self.model = FlaxLlamaModule(self.config, dtype=self.dtype, mesh=self.mesh)
         self.lm_head = nn.Dense(
             self.config.vocab_size,
             use_bias=False,

@@ -15,8 +15,14 @@ HF's missing flax support
 
 ### Notice
 
-You should use `input_shape` to prevent error by jax tpu flash attention kernel 🤗🤗
+You should use `input_shape` and `mesh` to prevent error by jax tpu flash attention kernel 🤗🤗
 ```python
-model = FlaxLlamaForCausalLM.from_pretrained("HuggingFaceM4/tiny-random-LlamaForCausalLM", from_pt=True, dtype=jnp.bfloat16, input_shape=(1, 128))
+model = FlaxLlamaForCausalLM.from_pretrained(
+    "HuggingFaceM4/tiny-random-LlamaForCausalLM",
+    from_pt=True,
+    dtype=jnp.bfloat16,
+    input_shape=(1, 128), # should be added
+    mesh=mesh # should be added
+)
 output = model(**input_ids).logits
 ```
