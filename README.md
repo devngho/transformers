@@ -9,7 +9,7 @@ HF's missing flax support
 
 - Flax 4d attention mask for correct packing (by position_ids or directly providing mask)
 - TPU flash attention
-- Supported models: BERT, GPT2, Llama, Mistral
+- Supported models: BERT, XLM-Roberta, GPT2, Llama, Mistral
 - RoPE correction for flax (longrope...)
 - lazy causal mask to prevent oom
 

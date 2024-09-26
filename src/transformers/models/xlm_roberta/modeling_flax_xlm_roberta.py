@@ -39,10 +39,11 @@ from ...modeling_flax_outputs import (
     FlaxSequenceClassifierOutput,
     FlaxTokenClassifierOutput,
 )
-from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, overwrite_call_docstring
+from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, overwrite_call_docstring, \
+    BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM, prepare_segment_ids_from_position_ids, tpu_flash_attention
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_xlm_roberta import XLMRobertaConfig
-
+from ...utils.import_utils import is_jax_tpu_available
 
 logger = logging.get_logger(__name__)
 
@@ -185,6 +186,7 @@ class FlaxXLMRobertaEmbeddings(nn.Module):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertSelfAttention with Bert->XLMRoberta
 class FlaxXLMRobertaSelfAttention(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     causal: bool = False
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
 
@@ -261,10 +263,12 @@ class FlaxXLMRobertaSelfAttention(nn.Module):
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         key_value_states: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
         deterministic=True,
         output_attentions: bool = False,
+        use_flash_attention: bool = is_jax_tpu_available(),
     ):
         # if key_value_states are provided this layer is used as a cross-attention layer
         # for the decoder
@@ -286,6 +290,10 @@ class FlaxXLMRobertaSelfAttention(nn.Module):
         query_states = self._split_heads(query_states)
         key_states = self._split_heads(key_states)
         value_states = self._split_heads(value_states)
+
+        query_states = nn.with_logical_constraint(query_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        key_states = nn.with_logical_constraint(key_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        value_states = nn.with_logical_constraint(value_states, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
 
         # handle cache prepare causal attention mask
         if self.causal:
@@ -331,23 +339,35 @@ class FlaxXLMRobertaSelfAttention(nn.Module):
         if not deterministic and self.config.attention_probs_dropout_prob > 0.0:
             dropout_rng = self.make_rng("dropout")
 
-        attn_weights = dot_product_attention_weights(
-            query_states,
-            key_states,
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.config.attention_probs_dropout_prob,
-            broadcast_dropout=True,
-            deterministic=deterministic,
-            dtype=self.dtype,
-            precision=None,
-        )
+        if not use_flash_attention:
+            attn_weights = dot_product_attention_weights(
+                query_states,
+                key_states,
+                bias=attention_bias,
+                dropout_rng=dropout_rng,
+                dropout_rate=self.config.attention_probs_dropout_prob,
+                broadcast_dropout=True,
+                deterministic=deterministic,
+                dtype=self.dtype,
+                precision=None,
+            )
 
-        # Mask heads if we want to
-        if layer_head_mask is not None:
-            attn_weights = jnp.einsum("...hqk,h->...hqk", attn_weights, layer_head_mask)
+            # Mask heads if we want to
+            if layer_head_mask is not None:
+                attn_weights = jnp.einsum("...hqk,h->...hqk", attn_weights, layer_head_mask)
 
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+            attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+        else:
+            segment_ids = prepare_segment_ids_from_position_ids(position_ids)
+            attn_weights = tpu_flash_attention(
+                self.mesh,
+                query_states,
+                key_states,
+                value_states,
+                decoder_segment_ids=segment_ids
+            )
+            attn_output = attn_weights
+
         attn_output = attn_output.reshape(attn_output.shape[:2] + (-1,))
 
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
@@ -378,11 +398,12 @@ class FlaxXLMRobertaSelfOutput(nn.Module):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertAttention with Bert->XLMRoberta
 class FlaxXLMRobertaAttention(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     causal: bool = False
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.self = FlaxXLMRobertaSelfAttention(self.config, causal=self.causal, dtype=self.dtype)
+        self.self = FlaxXLMRobertaSelfAttention(self.config, causal=self.causal, dtype=self.dtype, mesh=self.mesh)
         self.output = FlaxXLMRobertaSelfOutput(self.config, dtype=self.dtype)
 
     def __call__(
@@ -390,6 +411,7 @@ class FlaxXLMRobertaAttention(nn.Module):
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         key_value_states=None,
         init_cache=False,
         deterministic=True,
@@ -402,6 +424,7 @@ class FlaxXLMRobertaAttention(nn.Module):
             hidden_states,
             attention_mask,
             layer_head_mask=layer_head_mask,
+            position_ids=position_ids,
             key_value_states=key_value_states,
             init_cache=init_cache,
             deterministic=deterministic,
@@ -461,20 +484,22 @@ class FlaxXLMRobertaOutput(nn.Module):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertLayer with Bert->XLMRoberta
 class FlaxXLMRobertaLayer(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
 
     def setup(self):
-        self.attention = FlaxXLMRobertaAttention(self.config, causal=self.config.is_decoder, dtype=self.dtype)
+        self.attention = FlaxXLMRobertaAttention(self.config, causal=self.config.is_decoder, dtype=self.dtype, mesh=self.mesh)
         self.intermediate = FlaxXLMRobertaIntermediate(self.config, dtype=self.dtype)
         self.output = FlaxXLMRobertaOutput(self.config, dtype=self.dtype)
         if self.config.add_cross_attention:
-            self.crossattention = FlaxXLMRobertaAttention(self.config, causal=False, dtype=self.dtype)
+            self.crossattention = FlaxXLMRobertaAttention(self.config, causal=False, dtype=self.dtype, mesh=self.mesh)
 
     def __call__(
         self,
         hidden_states,
         attention_mask,
         layer_head_mask,
+        position_ids,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         encoder_attention_mask: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
@@ -485,6 +510,7 @@ class FlaxXLMRobertaLayer(nn.Module):
         attention_outputs = self.attention(
             hidden_states,
             attention_mask,
+            position_ids=position_ids,
             layer_head_mask=layer_head_mask,
             init_cache=init_cache,
             deterministic=deterministic,
@@ -496,6 +522,7 @@ class FlaxXLMRobertaLayer(nn.Module):
         if encoder_hidden_states is not None:
             cross_attention_outputs = self.crossattention(
                 attention_output,
+                position_ids=position_ids,
                 attention_mask=encoder_attention_mask,
                 layer_head_mask=layer_head_mask,
                 key_value_states=encoder_hidden_states,
@@ -519,6 +546,7 @@ class FlaxXLMRobertaLayer(nn.Module):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertLayerCollection with Bert->XLMRoberta
 class FlaxXLMRobertaLayerCollection(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
 
@@ -526,12 +554,12 @@ class FlaxXLMRobertaLayerCollection(nn.Module):
         if self.gradient_checkpointing:
             FlaxXLMRobertaCheckpointLayer = remat(FlaxXLMRobertaLayer, static_argnums=(5, 6, 7))
             self.layers = [
-                FlaxXLMRobertaCheckpointLayer(self.config, name=str(i), dtype=self.dtype)
+                FlaxXLMRobertaCheckpointLayer(self.config, name=str(i), dtype=self.dtype, mesh=self.mesh)
                 for i in range(self.config.num_hidden_layers)
             ]
         else:
             self.layers = [
-                FlaxXLMRobertaLayer(self.config, name=str(i), dtype=self.dtype)
+                FlaxXLMRobertaLayer(self.config, name=str(i), dtype=self.dtype, mesh=self.mesh)
                 for i in range(self.config.num_hidden_layers)
             ]
 
@@ -540,6 +568,7 @@ class FlaxXLMRobertaLayerCollection(nn.Module):
         hidden_states,
         attention_mask,
         head_mask,
+        position_ids,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         encoder_attention_mask: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
@@ -568,6 +597,7 @@ class FlaxXLMRobertaLayerCollection(nn.Module):
                 hidden_states,
                 attention_mask,
                 head_mask[i] if head_mask is not None else None,
+                position_ids,
                 encoder_hidden_states,
                 encoder_attention_mask,
                 init_cache,
@@ -602,6 +632,7 @@ class FlaxXLMRobertaLayerCollection(nn.Module):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertEncoder with Bert->XLMRoberta
 class FlaxXLMRobertaEncoder(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
 
@@ -610,6 +641,7 @@ class FlaxXLMRobertaEncoder(nn.Module):
             self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
 
     def __call__(
@@ -617,6 +649,7 @@ class FlaxXLMRobertaEncoder(nn.Module):
         hidden_states,
         attention_mask,
         head_mask,
+        position_ids,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         encoder_attention_mask: Optional[jnp.ndarray] = None,
         init_cache: bool = False,
@@ -629,6 +662,7 @@ class FlaxXLMRobertaEncoder(nn.Module):
             hidden_states,
             attention_mask,
             head_mask=head_mask,
+            position_ids=position_ids,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             init_cache=init_cache,
@@ -741,6 +775,7 @@ class FlaxXLMRobertaPreTrainedModel(FlaxPreTrainedModel):
     def __init__(
         self,
         config: XLMRobertaConfig,
+        mesh: jax.sharding.Mesh,
         input_shape: Tuple = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
@@ -748,7 +783,7 @@ class FlaxXLMRobertaPreTrainedModel(FlaxPreTrainedModel):
         gradient_checkpointing: bool = False,
         **kwargs,
     ):
-        module = self.module_class(config=config, dtype=dtype, gradient_checkpointing=gradient_checkpointing, **kwargs)
+        module = self.module_class(config=config, dtype=dtype, gradient_checkpointing=gradient_checkpointing, mesh=mesh, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
     # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertPreTrainedModel.enable_gradient_checkpointing
@@ -922,6 +957,7 @@ class FlaxXLMRobertaPreTrainedModel(FlaxPreTrainedModel):
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertModule with Bert->XLMRoberta
 class FlaxXLMRobertaModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     add_pooling_layer: bool = True
     gradient_checkpointing: bool = False
@@ -932,6 +968,7 @@ class FlaxXLMRobertaModule(nn.Module):
             self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.pooler = FlaxXLMRobertaPooler(self.config, dtype=self.dtype)
 
@@ -965,6 +1002,7 @@ class FlaxXLMRobertaModule(nn.Module):
             hidden_states,
             attention_mask,
             head_mask=head_mask,
+            position_ids=position_ids,
             deterministic=deterministic,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
@@ -1005,6 +1043,7 @@ append_call_sample_docstring(FlaxXLMRobertaModel, _CHECKPOINT_FOR_DOC, FlaxBaseM
 # Copied from transformers.models.roberta.modeling_flax_roberta.FlaxRobertaForMaskedLMModule with Roberta->XLMRoberta
 class FlaxXLMRobertaForMaskedLMModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1014,6 +1053,7 @@ class FlaxXLMRobertaForMaskedLMModule(nn.Module):
             add_pooling_layer=False,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.lm_head = FlaxXLMRobertaLMHead(config=self.config, dtype=self.dtype)
 
@@ -1078,6 +1118,7 @@ append_call_sample_docstring(
 # Copied from transformers.models.roberta.modeling_flax_roberta.FlaxRobertaForSequenceClassificationModule with Roberta->XLMRoberta
 class FlaxXLMRobertaForSequenceClassificationModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1087,6 +1128,7 @@ class FlaxXLMRobertaForSequenceClassificationModule(nn.Module):
             dtype=self.dtype,
             add_pooling_layer=False,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.classifier = FlaxXLMRobertaClassificationHead(config=self.config, dtype=self.dtype)
 
@@ -1150,6 +1192,7 @@ append_call_sample_docstring(
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertForMultipleChoiceModule with Bert->XLMRoberta, with self.bert->self.roberta
 class FlaxXLMRobertaForMultipleChoiceModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1158,6 +1201,7 @@ class FlaxXLMRobertaForMultipleChoiceModule(nn.Module):
             config=self.config,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.dropout = nn.Dropout(rate=self.config.hidden_dropout_prob)
         self.classifier = nn.Dense(1, dtype=self.dtype)
@@ -1234,6 +1278,7 @@ append_call_sample_docstring(
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertForTokenClassificationModule with Bert->XLMRoberta, with self.bert->self.roberta
 class FlaxXLMRobertaForTokenClassificationModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1243,6 +1288,7 @@ class FlaxXLMRobertaForTokenClassificationModule(nn.Module):
             dtype=self.dtype,
             add_pooling_layer=False,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         classifier_dropout = (
             self.config.classifier_dropout
@@ -1313,6 +1359,7 @@ append_call_sample_docstring(
 # Copied from transformers.models.bert.modeling_flax_bert.FlaxBertForQuestionAnsweringModule with Bert->XLMRoberta, with self.bert->self.roberta
 class FlaxXLMRobertaForQuestionAnsweringModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1322,6 +1369,7 @@ class FlaxXLMRobertaForQuestionAnsweringModule(nn.Module):
             dtype=self.dtype,
             add_pooling_layer=False,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.qa_outputs = nn.Dense(self.config.num_labels, dtype=self.dtype)
 
@@ -1390,6 +1438,7 @@ append_call_sample_docstring(
 # Copied from transformers.models.roberta.modeling_flax_roberta.FlaxRobertaForCausalLMModule with Roberta->XLMRoberta
 class FlaxXLMRobertaForCausalLMModule(nn.Module):
     config: XLMRobertaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
@@ -1399,6 +1448,7 @@ class FlaxXLMRobertaForCausalLMModule(nn.Module):
             add_pooling_layer=False,
             dtype=self.dtype,
             gradient_checkpointing=self.gradient_checkpointing,
+            mesh=self.mesh
         )
         self.lm_head = FlaxXLMRobertaLMHead(config=self.config, dtype=self.dtype)
 
