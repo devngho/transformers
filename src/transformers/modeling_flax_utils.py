@@ -1348,7 +1348,7 @@ def prepare_segment_ids_from_position_ids(position_ids: jnp.ndarray) -> jnp.ndar
     return segment_ids
 
 import functools
-from jax.experimental import shard_map
+from jax.experimental.shard_map import shard_map
 if is_jax_tpu_available():
     from jax.sharding import Mesh
     from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
