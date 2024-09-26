@@ -463,6 +463,7 @@ class FlaxBertAttention(nn.Module):
             hidden_states,
             attention_mask,
             layer_head_mask=layer_head_mask,
+            position_ids=position_ids,
             key_value_states=key_value_states,
             init_cache=init_cache,
             deterministic=deterministic,
