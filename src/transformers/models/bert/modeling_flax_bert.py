@@ -304,8 +304,11 @@ class FlaxBertSelfAttention(nn.Module):
         init_cache: bool = False,
         deterministic=True,
         output_attentions: bool = False,
-        use_flash_attention: bool = is_jax_tpu_available(),
+        use_flash_attention: Optional[bool] = None,
     ):
+        if use_flash_attention is None:
+            use_flash_attention = self.config.attention_implementation == 'flash_attention_tpu'
+
         # if key_value_states are provided this layer is used as a cross-attention layer
         # for the decoder
         is_cross_attention = key_value_states is not None

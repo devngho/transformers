@@ -308,8 +308,11 @@ class FlaxLlamaAttention(nn.Module):
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
-        use_flash_attention: bool = is_jax_tpu_available(),
+        use_flash_attention: Optional[bool] = None,
     ):
+        if use_flash_attention is None:
+            use_flash_attention = self.config.attention_implementation == 'flash_attention_tpu'
+
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)

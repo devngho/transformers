@@ -200,12 +200,15 @@ class FlaxGPT2Attention(nn.Module):
         hidden_states,
         key_value_states: Optional[jnp.ndarray] = None,
         attention_mask=None,
+        position_ids: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
-        use_flash_attention: bool = is_jax_tpu_available(),
-        position_ids: Optional[jnp.ndarray] = None,
+        use_flash_attention: Optional[bool] = None,
     ):
+        if use_flash_attention is None:
+            use_flash_attention = self.config.attn_implementation == 'flash_attention_tpu'
+
         # if key_value_states are provided this layer is used as a cross-attention layer
         # for the decoder
         is_cross_attention = key_value_states is not None

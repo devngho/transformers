@@ -23,6 +23,7 @@ model = FlaxLlamaForCausalLM.from_pretrained(
     mesh, # should be added (mesh)
     from_pt=True,
     dtype=jnp.bfloat16,
+    attn_implementation='flash_attention_tpu' # or eager (defaults to eager)
 )
 output = model(**input_ids).logits
 ```

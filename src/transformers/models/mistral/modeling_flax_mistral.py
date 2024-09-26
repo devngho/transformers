@@ -319,8 +319,11 @@ class FlaxMistralAttention(nn.Module):
         deterministic: bool = True,
         output_attentions: bool = False,
         init_cache: bool = False,
-        use_flash_attention: bool = is_jax_tpu_available(),
+        use_flash_attention: Optional[bool] = None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        if use_flash_attention is None:
+            use_flash_attention = self.config.attention_implementation == 'flash_attention_tpu'
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
