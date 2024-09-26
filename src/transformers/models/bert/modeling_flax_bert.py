@@ -224,6 +224,7 @@ class FlaxBertSelfAttention(nn.Module):
     config: BertConfig
     causal: bool = False
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
