@@ -132,10 +132,10 @@ class FlaxConv1D(nn.Module):
 
 class FlaxGPT2Attention(nn.Module):
     config: GPT2Config
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     causal: bool = True
     is_cross_attention: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         config = self.config
@@ -329,8 +329,8 @@ class FlaxGPT2MLP(nn.Module):
 
 class FlaxGPT2Block(nn.Module):
     config: GPT2Config
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         hidden_size = self.config.hidden_size

@@ -233,10 +233,10 @@ class FlaxLlamaRotaryEmbedding(nn.Module):
 
 class FlaxLlamaAttention(nn.Module):
     config: LlamaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     causal: bool = True
     is_cross_attention: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         config = self.config
@@ -427,8 +427,8 @@ class FlaxLlamaMLP(nn.Module):
 
 
 class FlaxLlamaDecoderLayer(nn.Module):
-    mesh: jax.sharding.Mesh
     config: LlamaConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -613,8 +613,8 @@ class FlaxLlamaPreTrainedModel(FlaxPreTrainedModel):
 
 class FlaxLlamaLayerCollection(nn.Module):
     config: LlamaConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.blocks = [
@@ -660,8 +660,8 @@ class FlaxLlamaLayerCollection(nn.Module):
 
 class FlaxLlamaModule(nn.Module):
     config: LlamaConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
@@ -737,8 +737,8 @@ append_call_sample_docstring(
 
 class FlaxLlamaForCausalLMModule(nn.Module):
     config: LlamaConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.model = FlaxLlamaModule(self.config, dtype=self.dtype, mesh=self.mesh)

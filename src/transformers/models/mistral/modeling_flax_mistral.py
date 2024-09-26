@@ -257,8 +257,8 @@ def rotate_half(tensor):
 
 class FlaxMistralAttention(nn.Module):
     config: MistralConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         config = self.config
@@ -413,8 +413,8 @@ class FlaxMistralAttention(nn.Module):
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Mistral
 class FlaxMistralDecoderLayer(nn.Module):
     config: MistralConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.input_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
@@ -599,8 +599,8 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaLayerCollection with Llama->Mistral
 class FlaxMistralLayerCollection(nn.Module):
     config: MistralConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.blocks = [
@@ -647,8 +647,8 @@ class FlaxMistralLayerCollection(nn.Module):
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModule with Llama->Mistral
 class FlaxMistralModule(nn.Module):
     config: MistralConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
@@ -725,8 +725,8 @@ append_call_sample_docstring(
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaForCausalLMModule with Llama->Mistral
 class FlaxMistralForCausalLMModule(nn.Module):
     config: MistralConfig
-    dtype: jnp.dtype = jnp.float32
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.model = FlaxMistralModule(self.config, dtype=self.dtype, mesh=self.mesh)

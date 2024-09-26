@@ -222,9 +222,9 @@ class FlaxBertEmbeddings(nn.Module):
 
 class FlaxBertSelfAttention(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     causal: bool = False
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -437,9 +437,9 @@ class FlaxBertSelfOutput(nn.Module):
 
 class FlaxBertAttention(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     causal: bool = False
     dtype: jnp.dtype = jnp.float32
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.self = FlaxBertSelfAttention(self.config, causal=self.causal, dtype=self.dtype, mesh=self.mesh)
@@ -519,8 +519,8 @@ class FlaxBertOutput(nn.Module):
 
 class FlaxBertLayer(nn.Module):
     config: BertConfig
-    dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     mesh: jax.sharding.Mesh
+    dtype: jnp.dtype = jnp.float32  # the dtype of the computation
 
     def setup(self):
         self.attention = FlaxBertAttention(self.config, causal=self.config.is_decoder, dtype=self.dtype, mesh=self.mesh)
@@ -582,9 +582,9 @@ class FlaxBertLayer(nn.Module):
 
 class FlaxBertLayerCollection(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         if self.gradient_checkpointing:
@@ -664,9 +664,9 @@ class FlaxBertLayerCollection(nn.Module):
 
 class FlaxBertEncoder(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.layer = FlaxBertLayerCollection(
@@ -993,10 +993,10 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
 
 class FlaxBertModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
     add_pooling_layer: bool = True
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.embeddings = FlaxBertEmbeddings(self.config, dtype=self.dtype)
@@ -1077,9 +1077,9 @@ append_call_sample_docstring(FlaxBertModel, _CHECKPOINT_FOR_DOC, FlaxBaseModelOu
 
 class FlaxBertForPreTrainingModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1179,9 +1179,9 @@ append_replace_return_docstrings(
 
 class FlaxBertForMaskedLMModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1247,9 +1247,9 @@ append_call_sample_docstring(FlaxBertForMaskedLM, _CHECKPOINT_FOR_DOC, FlaxMaske
 
 class FlaxBertForNextSentencePredictionModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1341,9 +1341,9 @@ append_replace_return_docstrings(
 
 class FlaxBertForSequenceClassificationModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1423,9 +1423,9 @@ append_call_sample_docstring(
 
 class FlaxBertForMultipleChoiceModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1505,9 +1505,9 @@ append_call_sample_docstring(
 
 class FlaxBertForTokenClassificationModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1582,9 +1582,9 @@ append_call_sample_docstring(
 
 class FlaxBertForQuestionAnsweringModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
@@ -1660,9 +1660,9 @@ append_call_sample_docstring(
 
 class FlaxBertForCausalLMModule(nn.Module):
     config: BertConfig
+    mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
-    mesh: jax.sharding.Mesh
 
     def setup(self):
         self.bert = FlaxBertModule(
