@@ -48,6 +48,10 @@ from ...modeling_flax_utils import (
 )
 from ...utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_bert import BertConfig
+from ...utils.import_utils import is_jax_tpu_available
+
+if is_jax_tpu_available():
+    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 
 
 logger = logging.get_logger(__name__)
@@ -300,6 +304,7 @@ class FlaxBertSelfAttention(nn.Module):
         init_cache: bool = False,
         deterministic=True,
         output_attentions: bool = False,
+        use_flash_attention: bool = is_jax_tpu_available(),
     ):
         # if key_value_states are provided this layer is used as a cross-attention layer
         # for the decoder
@@ -322,9 +327,10 @@ class FlaxBertSelfAttention(nn.Module):
         key_states = self._split_heads(key_states)
         value_states = self._split_heads(value_states)
 
+        query_length, key_length = query_states.shape[1], key_states.shape[1]
+
         # handle cache prepare causal attention mask
         if self.causal:
-            query_length, key_length = query_states.shape[1], key_states.shape[1]
             if self.has_variable("cache", "cached_key"):
                 mask_shift = self.variables["cache"]["cache_index"]
                 max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
@@ -362,27 +368,43 @@ class FlaxBertSelfAttention(nn.Module):
         else:
             attention_bias = None
 
+        bsz = attention_bias.shape[0]
+
+        attention_bias = jnp.broadcast_to(attention_bias, (bsz, query_states.shape[2], query_length, key_length))
+
         dropout_rng = None
         if not deterministic and self.config.attention_probs_dropout_prob > 0.0:
             dropout_rng = self.make_rng("dropout")
 
-        attn_weights = dot_product_attention_weights(
-            query_states,
-            key_states,
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.config.attention_probs_dropout_prob,
-            broadcast_dropout=True,
-            deterministic=deterministic,
-            dtype=self.dtype,
-            precision=None,
-        )
+        if not use_flash_attention:
+            attn_weights = dot_product_attention_weights(
+                query_states,
+                key_states,
+                bias=attention_bias,
+                dropout_rng=dropout_rng,
+                dropout_rate=self.config.attention_probs_dropout_prob,
+                broadcast_dropout=True,
+                deterministic=deterministic,
+                dtype=self.dtype,
+                precision=None,
+            )
 
-        # Mask heads if we want to
-        if layer_head_mask is not None:
-            attn_weights = jnp.einsum("...hqk,h->...hqk", attn_weights, layer_head_mask)
+            # Mask heads if we want to
+            if layer_head_mask is not None:
+                attn_weights = jnp.einsum("...hqk,h->...hqk", attn_weights, layer_head_mask)
 
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+            attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+        else:
+            query_fa, key_fa, value_fa = jnp.transpose(query_states, (0, 2, 1, 3)), jnp.transpose(key_states, (0, 2, 1, 3)), jnp.transpose(value_states, (0, 2, 1, 3))
+            attn_weights = flash_attention(
+                query_fa,
+                key_fa,
+                value_fa,
+                ab=attention_bias,
+                causal=self.causal
+            )
+            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+
         attn_output = attn_output.reshape(attn_output.shape[:2] + (-1,))
 
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
