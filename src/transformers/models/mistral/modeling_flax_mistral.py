@@ -322,7 +322,7 @@ class FlaxMistralAttention(nn.Module):
         use_flash_attention: Optional[bool] = None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         if use_flash_attention is None:
-            use_flash_attention = self.config.attn_implementation == 'flash_attention_tpu'
+            use_flash_attention = self.config._attn_implementation == 'flash_attention_tpu'
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)

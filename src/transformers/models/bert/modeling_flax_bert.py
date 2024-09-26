@@ -307,7 +307,7 @@ class FlaxBertSelfAttention(nn.Module):
         use_flash_attention: Optional[bool] = None,
     ):
         if use_flash_attention is None:
-            use_flash_attention = self.config.attention_implementation == 'flash_attention_tpu'
+            use_flash_attention = self.config._attn_implementation == 'flash_attention_tpu'
 
         # if key_value_states are provided this layer is used as a cross-attention layer
         # for the decoder

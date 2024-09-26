@@ -311,7 +311,7 @@ class FlaxLlamaAttention(nn.Module):
         use_flash_attention: Optional[bool] = None,
     ):
         if use_flash_attention is None:
-            use_flash_attention = self.config.attn_implementation == 'flash_attention_tpu'
+            use_flash_attention = self.config._attn_implementation == 'flash_attention_tpu'
 
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
