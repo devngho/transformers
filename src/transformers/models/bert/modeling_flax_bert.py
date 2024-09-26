@@ -806,6 +806,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
     def __init__(
         self,
         config: BertConfig,
+        mesh: jax.sharding.Mesh,
         input_shape: Tuple = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
@@ -817,6 +818,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
             config=config,
             dtype=dtype,
             gradient_checkpointing=gradient_checkpointing,
+            mesh=mesh,
             **kwargs,
         )
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)

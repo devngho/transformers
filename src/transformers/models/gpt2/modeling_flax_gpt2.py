@@ -29,11 +29,10 @@ from ...modeling_flax_outputs import (
     FlaxCausalLMOutputWithCrossAttentions,
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring, \
-    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids
+    prepare_flax_attention_from_position_ids, prepare_segment_ids_from_position_ids, tpu_flash_attention, BATCH, LENGTH, \
+    KV_HEAD, KV_HEAD_DIM, EMBED
 from ...utils.import_utils import is_jax_tpu_available
 
-if is_jax_tpu_available():
-    from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention, SegmentIds
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_gpt2 import GPT2Config
 
@@ -136,6 +135,7 @@ class FlaxGPT2Attention(nn.Module):
     dtype: jnp.dtype = jnp.float32
     causal: bool = True
     is_cross_attention: bool = False
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         config = self.config
@@ -224,6 +224,10 @@ class FlaxGPT2Attention(nn.Module):
         key = self._split_heads(key)
         value = self._split_heads(value)
 
+        query = nn.with_logical_constraint(query, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        key = nn.with_logical_constraint(key, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+        value = nn.with_logical_constraint(value, (BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM))
+
         query_length, key_length = query.shape[1], key.shape[1]
 
         if self.causal:
@@ -286,16 +290,14 @@ class FlaxGPT2Attention(nn.Module):
             attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
         else:
             segment_ids = prepare_segment_ids_from_position_ids(position_ids)
-            query_fa, key_fa, value_fa = jnp.transpose(query, (0, 2, 1, 3)), jnp.transpose(key, (0, 2, 1, 3)), jnp.transpose(value, (0, 2, 1, 3))
-            attn_weights = flash_attention(
-                query_fa,
-                key_fa,
-                value_fa,
-                ab=attention_bias,
-                segment_ids=SegmentIds(segment_ids, segment_ids),
-                causal=self.causal
+            attn_weights = tpu_flash_attention(
+                self.mesh,
+                query,
+                key,
+                value,
+                decoder_segment_ids=segment_ids
             )
-            attn_output = jnp.transpose(attn_weights, (0, 2, 1, 3))
+            attn_output = attn_weights
 
         attn_output = self._merge_heads(attn_output)
         attn_output = self.c_proj(attn_output)
@@ -328,18 +330,19 @@ class FlaxGPT2MLP(nn.Module):
 class FlaxGPT2Block(nn.Module):
     config: GPT2Config
     dtype: jnp.dtype = jnp.float32
+    mesh: jax.sharding.Mesh
 
     def setup(self):
         hidden_size = self.config.hidden_size
         inner_dim = self.config.n_inner if self.config.n_inner is not None else 4 * hidden_size
 
         self.ln_1 = nn.LayerNorm(epsilon=self.config.layer_norm_epsilon, dtype=self.dtype)
-        self.attn = FlaxGPT2Attention(self.config, dtype=self.dtype)
+        self.attn = FlaxGPT2Attention(self.config, dtype=self.dtype, mesh=self.mesh)
         self.ln_2 = nn.LayerNorm(epsilon=self.config.layer_norm_epsilon, dtype=self.dtype)
 
         if self.config.add_cross_attention:
             self.crossattention = FlaxGPT2Attention(
-                config=self.config, dtype=self.dtype, causal=False, is_cross_attention=True
+                config=self.config, dtype=self.dtype, causal=False, is_cross_attention=True, mesh=self.mesh
             )
             self.ln_cross_attn = nn.LayerNorm(epsilon=self.config.layer_norm_epsilon, dtype=self.dtype)
 
@@ -356,6 +359,8 @@ class FlaxGPT2Block(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
     ):
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
+
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
@@ -366,11 +371,13 @@ class FlaxGPT2Block(nn.Module):
             init_cache=init_cache,
             output_attentions=output_attentions,
         )
+        attn_outputs = nn.with_logical_constraint(attn_outputs, (BATCH, LENGTH, EMBED))
         # residual connection
         attn_output = attn_outputs[0]  # output_attn: a, (attentions)
         outputs = attn_outputs[1:]
         # residual connection
         hidden_states = attn_output + residual
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         # Cross-Attention Block
         if encoder_hidden_states is not None:
@@ -390,6 +397,7 @@ class FlaxGPT2Block(nn.Module):
                 deterministic=deterministic,
                 output_attentions=output_attentions,
             )
+            cross_attn_outputs = nn.with_logical_constraint(cross_attn_outputs, (BATCH, LENGTH, EMBED))
             attn_output = cross_attn_outputs[0]
             # residual connection
             hidden_states = residual + attn_output
@@ -398,8 +406,10 @@ class FlaxGPT2Block(nn.Module):
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
         feed_forward_hidden_states = self.mlp(hidden_states, deterministic=deterministic)
+        feed_forward_hidden_states = nn.with_logical_constraint(feed_forward_hidden_states, (BATCH, LENGTH, EMBED))
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         outputs = (hidden_states,) + outputs
 
@@ -419,13 +429,14 @@ class FlaxGPT2PreTrainedModel(FlaxPreTrainedModel):
     def __init__(
         self,
         config: GPT2Config,
+        mesh: jax.sharding.Mesh,
         input_shape: Tuple = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
         _do_init: bool = True,
         **kwargs,
     ):
-        module = self.module_class(config=config, dtype=dtype, **kwargs)
+        module = self.module_class(config=config, dtype=dtype, mesh=mesh, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
