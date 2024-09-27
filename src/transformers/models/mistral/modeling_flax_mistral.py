@@ -227,9 +227,9 @@ class FlaxMistralMLP(nn.Module):
         kernel_init = jax.nn.initializers.normal(self.config.initializer_range)
         self.act = ACT2FN[self.config.hidden_act]
 
-        self.gate_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, kernel_init=kernel_init)
-        self.down_proj = nn.Dense(embed_dim, use_bias=False, dtype=self.dtype, kernel_init=kernel_init)
-        self.up_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, kernel_init=kernel_init)
+        self.gate_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype, kernel_init=kernel_init)
+        self.down_proj = nn.Dense(embed_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype, kernel_init=kernel_init)
+        self.up_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype, kernel_init=kernel_init)
 
     def __call__(self, hidden_states):
         up_proj_states = self.up_proj(hidden_states)
@@ -271,10 +271,10 @@ class FlaxMistralAttention(nn.Module):
         self.attention_softmax_in_fp32 = self.dtype is not jnp.float32
         self.rope_theta = config.rope_theta
 
-        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
+        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype)
+        self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype)
+        self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, params_dtype=self.dtype)
+        self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype, params_dtype=self.dtype)
 
         self.rotary_emb = FlaxMistralRotaryEmbedding(config, dtype=self.dtype)
 
