@@ -631,8 +631,8 @@ class FlaxMistralLayerCollection(nn.Module):
                 all_hidden_states += (hidden_states,)
             layer_outputs = block(
                 hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
+                attention_mask,
+                position_ids,
                 deterministic=deterministic,
                 init_cache=init_cache,
                 output_attentions=output_attentions,
