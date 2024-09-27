@@ -606,7 +606,7 @@ class FlaxMistralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5))
+        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
         self.blocks = [
             FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
             for i in range(self.config.num_hidden_layers)
@@ -633,9 +633,9 @@ class FlaxMistralLayerCollection(nn.Module):
                 hidden_states,
                 attention_mask,
                 position_ids,
-                deterministic=deterministic,
-                init_cache=init_cache,
-                output_attentions=output_attentions,
+                deterministic,
+                init_cache,
+                output_attentions,
             )
             hidden_states = layer_outputs[0]
 
