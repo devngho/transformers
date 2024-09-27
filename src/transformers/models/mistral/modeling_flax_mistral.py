@@ -606,9 +606,9 @@ class FlaxMistralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        FlaxMistralCheckpointLayer = jax.checkpoint(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5))
+        FlaxMistralCheckpointLayer = nn.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5))
         self.blocks = [
-            jax.checkpoint(FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh))
+            FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
             for i in range(self.config.num_hidden_layers)
         ]
 
