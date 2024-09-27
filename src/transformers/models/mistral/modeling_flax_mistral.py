@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.linen import combine_masks, make_causal_mask
+from flax.linen import combine_masks, make_causal_mask, partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
@@ -606,7 +606,7 @@ class FlaxMistralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        FlaxMistralCheckpointLayer = nn.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5))
+        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5))
         self.blocks = [
             FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
             for i in range(self.config.num_hidden_layers)
