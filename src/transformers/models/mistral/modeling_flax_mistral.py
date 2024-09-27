@@ -428,8 +428,8 @@ class FlaxMistralDecoderLayer(nn.Module):
     def __call__(
         self,
         hidden_states,
-        attention_mask=None,
-        position_ids=None,
+        attention_mask,
+        position_ids,
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
