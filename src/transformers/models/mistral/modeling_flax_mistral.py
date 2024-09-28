@@ -466,7 +466,7 @@ class FlaxMistralDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
-        return (hidden_states,) + outputs[1:], None if self.use_scan_layers else (hidden_states,) + outputs[1:]
+        return ((hidden_states,) + outputs[1:], None) if self.use_scan_layers else (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mistral, GPT_NEO->MISTRAL, transformer->model
@@ -638,18 +638,18 @@ class FlaxMistralLayerCollection(nn.Module):
             metadata_params={nn.PARTITION_NAME: metdata_axis_name},
         )
 
-        return scan_fn(self.config, dtype=self.dtype, name="layers", mesh=mesh)
+        return scan_fn(self.config, dtype=self.dtype, name="layers", mesh=mesh, use_scan_layers=self.use_scan_layers)
 
     def setup(self):
         print('dtype(layercollection): ', self.dtype)
         FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
         if self.use_scan_layers:
+            self.blocks = [self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)]
+        else:
             self.blocks = [
                 FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh, use_scan_layers=self.use_scan_layers)
                 for i in range(self.config.num_hidden_layers)
             ]
-        else:
-            self.blocks = [self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)]
 
     def __call__(
         self,
