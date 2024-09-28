@@ -453,9 +453,9 @@ class FlaxMistralDecoderLayer(nn.Module):
             output_attentions=output_attentions,
         )
 
-        outputs = nn.with_logical_constraint(outputs, (BATCH, LENGTH, EMBED))
-        # residual connection
         attn_output = outputs[0]
+        attn_output = nn.with_logical_constraint(attn_output, (BATCH, LENGTH, EMBED))
+        # residual connection
         hidden_states = residual + attn_output
 
         residual = hidden_states
@@ -642,7 +642,7 @@ class FlaxMistralLayerCollection(nn.Module):
 
     def setup(self):
         print('dtype(layercollection): ', self.dtype)
-        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
+        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims, prevent_cse=not self.use_scan_layers)
         if self.use_scan_layers:
             self.blocks = [self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)]
         else:
@@ -673,7 +673,7 @@ class FlaxMistralLayerCollection(nn.Module):
                 init_cache,
                 output_attentions,
             )
-            hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs
         else:
             for block in self.blocks:
                 layer_outputs = block(
