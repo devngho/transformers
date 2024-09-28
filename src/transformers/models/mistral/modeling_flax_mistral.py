@@ -440,6 +440,7 @@ class FlaxMistralDecoderLayer(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
     ):
+        print(hidden_states, attention_mask, position_ids, deterministic, init_cache, output_attentions)
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         residual = hidden_states
@@ -665,7 +666,7 @@ class FlaxMistralLayerCollection(nn.Module):
         if output_attentions or output_hidden_states: assert False, 'not implemented'
 
         if self.use_scan_layers:
-            layer_outputs = self.blocks[0](
+            layer_outputs, _ = self.blocks[0](
                 hidden_states,
                 attention_mask,
                 position_ids,
