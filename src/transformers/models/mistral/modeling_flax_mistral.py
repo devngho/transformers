@@ -467,6 +467,8 @@ class FlaxMistralDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
+        print(hidden_states)
+
         return (hidden_states, None) if self.use_scan_layers else (hidden_states,) + outputs[1:]
 
 
