@@ -659,7 +659,7 @@ class FlaxMistralLayerCollection(nn.Module):
     ):
         if output_attentions or output_hidden_states: assert False, 'not implemented'
 
-        layer_outputs = self.block(
+        layer_outputs = self.blocks(
             hidden_states,
             attention_mask,
             position_ids,
