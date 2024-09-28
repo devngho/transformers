@@ -737,9 +737,7 @@ class FlaxMistralModule(nn.Module):
             return_dict=return_dict,
         )
 
-        # hidden_states = outputs[0]
-        print(outputs)
-        hidden_states = outputs
+        hidden_states = outputs[0]
         hidden_states = self.norm(hidden_states)
 
         # if output_hidden_states:
