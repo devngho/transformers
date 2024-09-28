@@ -422,6 +422,7 @@ class FlaxMistralDecoderLayer(nn.Module):
     config: MistralConfig
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
+    use_scan_layers: bool = True
 
     def setup(self):
         print('dtype(layer): ',self. dtype)
@@ -465,7 +466,7 @@ class FlaxMistralDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
-        return (hidden_states,) + outputs[1:]
+        return (hidden_states,) + outputs[1:], None if self.use_scan_layers else (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mistral, GPT_NEO->MISTRAL, transformer->model
@@ -610,6 +611,7 @@ class FlaxMistralLayerCollection(nn.Module):
     config: MistralConfig
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
+    use_scan_layers: bool = True
 
     # From maxtext/MaxText/layers/models.py, adapted for transformers
     # apache 2.0
@@ -641,11 +643,13 @@ class FlaxMistralLayerCollection(nn.Module):
     def setup(self):
         print('dtype(layercollection): ', self.dtype)
         FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
-        # self.blocks = [
-        #     FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
-        #     for i in range(self.config.num_hidden_layers)
-        # ]
-        self.blocks = self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)
+        if self.use_scan_layers:
+            self.blocks = [
+                FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh, use_scan_layers=self.use_scan_layers)
+                for i in range(self.config.num_hidden_layers)
+            ]
+        else:
+            self.blocks = [self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)]
 
     def __call__(
         self,
@@ -660,17 +664,30 @@ class FlaxMistralLayerCollection(nn.Module):
     ):
         if output_attentions or output_hidden_states: assert False, 'not implemented'
 
-        layer_outputs = self.blocks(
-            hidden_states,
-            attention_mask,
-            position_ids,
-            deterministic,
-            init_cache,
-            output_attentions,
-        )
+        if self.use_scan_layers:
+            layer_outputs = self.blocks[0](
+                hidden_states,
+                attention_mask,
+                position_ids,
+                deterministic,
+                init_cache,
+                output_attentions,
+            )
+            hidden_states = layer_outputs[0]
+        else:
+            for block in self.blocks:
+                layer_outputs = block(
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    deterministic,
+                    init_cache,
+                    output_attentions,
+                )
+                hidden_states = layer_outputs[0]
 
         # this contains possible `None` values - `FlaxMistralModule` will filter them out
-        outputs = (layer_outputs[0], None, None)
+        outputs = (hidden_states, None, None), None if self.use_scan_layers else (hidden_states, None, None)
 
         return outputs
 
