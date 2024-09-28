@@ -737,22 +737,24 @@ class FlaxMistralModule(nn.Module):
             return_dict=return_dict,
         )
 
-        hidden_states = outputs[0]
+        # hidden_states = outputs[0]
+        hidden_states = outputs
         hidden_states = self.norm(hidden_states)
 
-        if output_hidden_states:
-            all_hidden_states = outputs[1] + (hidden_states,)
-            outputs = (hidden_states, all_hidden_states) + outputs[2:]
-        else:
-            outputs = (hidden_states,) + outputs[1:]
+        # if output_hidden_states:
+        #     all_hidden_states = outputs[1] + (hidden_states,)
+        #     outputs = (hidden_states, all_hidden_states) + outputs[2:]
+        # else:
+        #     outputs = (hidden_states,) + outputs[1:]
 
         if not return_dict:
-            return tuple(v for v in outputs if v is not None)
+            return hidden_states, None, None
+            # return tuple(v for v in outputs if v is not None)
 
         return FlaxBaseModelOutput(
             last_hidden_state=hidden_states,
-            hidden_states=outputs[1],
-            attentions=outputs[-1],
+            # hidden_states=outputs[1],
+            # attentions=outputs[-1],
         )
 
 
