@@ -690,7 +690,7 @@ class FlaxMistralLayerCollection(nn.Module):
                 hidden_states = layer_outputs[0]
 
         # this contains possible `None` values - `FlaxMistralModule` will filter them out
-        outputs = (hidden_states, None, None), None if self.use_scan_layers else (hidden_states, None, None)
+        outputs = hidden_states, None, None
 
         return outputs
 
@@ -738,6 +738,7 @@ class FlaxMistralModule(nn.Module):
         )
 
         # hidden_states = outputs[0]
+        print(outputs)
         hidden_states = outputs
         hidden_states = self.norm(hidden_states)
 
