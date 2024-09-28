@@ -611,7 +611,7 @@ class FlaxMistralLayerCollection(nn.Module):
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
 
-    # From maxtext/MaxText/layers/models.py
+    # From maxtext/MaxText/layers/models.py, adapted for transformers
     # apache 2.0
     def scan_decoder_layers(self, decoder_layer, length, metdata_axis_name, mesh):
         initializing = self.is_mutable_collection("params")
@@ -635,7 +635,7 @@ class FlaxMistralLayerCollection(nn.Module):
             metadata_params={nn.PARTITION_NAME: metdata_axis_name},
         )
 
-        return scan_fn(mesh=mesh, name="layers", quant=self.quant)
+        return scan_fn(self.config, dtype=self.dtype, name="layers", mesh=mesh)
 
     def setup(self):
         print('dtype(layercollection): ', self.dtype)
