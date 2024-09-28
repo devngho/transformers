@@ -221,6 +221,8 @@ class FlaxMistralMLP(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        print('dtype(mlp): ', self.dtype)
+
         embed_dim = self.config.hidden_size
         inner_dim = self.config.intermediate_size if self.config.intermediate_size is not None else 4 * embed_dim
 
@@ -261,6 +263,7 @@ class FlaxMistralAttention(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        print('dtype(attn): ', self.dtype)
         config = self.config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -420,6 +423,7 @@ class FlaxMistralDecoderLayer(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        print('dtype(layer): ',self. dtype)
         self.input_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
         self.self_attn = FlaxMistralAttention(self.config, dtype=self.dtype, mesh=self.mesh)
         self.post_attention_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
@@ -484,6 +488,7 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
         _do_init: bool = True,
         **kwargs,
     ):
+        print('dtype: ', dtype)
         module = self.module_class(config=config, dtype=dtype, mesh=mesh, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
@@ -606,6 +611,7 @@ class FlaxMistralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        print('dtype(layercollection): ', self.dtype)
         FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
         self.blocks = [
             FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
