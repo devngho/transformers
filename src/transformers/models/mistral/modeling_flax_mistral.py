@@ -234,6 +234,7 @@ class FlaxMistralMLP(nn.Module):
         self.up_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=kernel_init)
 
     def __call__(self, hidden_states):
+        print('dtype(mlp): ', hidden_states)
         up_proj_states = self.up_proj(hidden_states)
         gate_states = self.act(self.gate_proj(hidden_states))
 
@@ -610,13 +611,40 @@ class FlaxMistralLayerCollection(nn.Module):
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
 
+    # From maxtext/MaxText/layers/models.py
+    # apache 2.0
+    def scan_decoder_layers(self, decoder_layer, length, metdata_axis_name, mesh):
+        initializing = self.is_mutable_collection("params")
+        params_spec = 1 if initializing else nn.partitioning.ScanIn(1)
+        scan_fn = nn.scan(
+            decoder_layer,
+            variable_axes={
+                "params": params_spec
+            },
+            split_rngs={
+                "params": True,
+                "dropout": self.config.attention_dropout != 0.0,
+            },
+            in_axes=(
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+            ),
+            length=length,
+            metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+        )
+
+        return scan_fn(mesh=mesh, name="layers", quant=self.quant)
+
     def setup(self):
         print('dtype(layercollection): ', self.dtype)
         FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
-        self.blocks = [
-            FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
-            for i in range(self.config.num_hidden_layers)
-        ]
+        # self.blocks = [
+        #     FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
+        #     for i in range(self.config.num_hidden_layers)
+        # ]
+        self.blocks = self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)
 
     def __call__(
         self,
@@ -629,27 +657,19 @@ class FlaxMistralLayerCollection(nn.Module):
         output_hidden_states: bool = False,
         return_dict: bool = False,
     ):
-        all_attentions = () if output_attentions else None
-        all_hidden_states = () if output_hidden_states else None
+        if output_attentions or output_hidden_states: assert False, 'not implemented'
 
-        for block in self.blocks:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-            layer_outputs = block(
-                hidden_states,
-                attention_mask,
-                position_ids,
-                deterministic,
-                init_cache,
-                output_attentions,
-            )
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_attentions += (layer_outputs[1],)
+        layer_outputs = self.block(
+            hidden_states,
+            attention_mask,
+            position_ids,
+            deterministic,
+            init_cache,
+            output_attentions,
+        )
 
         # this contains possible `None` values - `FlaxMistralModule` will filter them out
-        outputs = (hidden_states, all_hidden_states, all_attentions)
+        outputs = (layer_outputs[0], None, None)
 
         return outputs
 
