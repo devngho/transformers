@@ -139,7 +139,7 @@ class FlaxMistralRMSNorm(nn.Module):
 
     def setup(self):
         self.epsilon = self.config.rms_norm_eps
-        self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
+        self.weight = self.param("weight", lambda _, shape: jnp.ones(shape, dtype=self.dtype), self.config.hidden_size)
 
     def __call__(self, hidden_states):
         variance = jnp.asarray(hidden_states, dtype=jnp.float32)
@@ -662,6 +662,7 @@ class FlaxMistralModule(nn.Module):
             self.hidden_size,
             embedding_init=embedding_init,
             dtype=self.dtype,
+            param_dtype=self.dtype,
         )
         self.layers = FlaxMistralLayerCollection(self.config, dtype=self.dtype, mesh=self.mesh)
         self.norm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
