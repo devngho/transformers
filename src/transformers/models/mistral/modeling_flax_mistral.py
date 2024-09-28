@@ -630,6 +630,7 @@ class FlaxMistralLayerCollection(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
+                nn.broadcast,
             ),
             length=length,
             metadata_params={nn.PARTITION_NAME: metdata_axis_name},
