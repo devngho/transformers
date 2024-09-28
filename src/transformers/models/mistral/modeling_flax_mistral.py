@@ -221,8 +221,6 @@ class FlaxMistralMLP(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        print('dtype(mlp): ', self.dtype)
-
         embed_dim = self.config.hidden_size
         inner_dim = self.config.intermediate_size if self.config.intermediate_size is not None else 4 * embed_dim
 
@@ -234,7 +232,6 @@ class FlaxMistralMLP(nn.Module):
         self.up_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=kernel_init)
 
     def __call__(self, hidden_states):
-        print('dtype(mlp): ', hidden_states)
         up_proj_states = self.up_proj(hidden_states)
         gate_states = self.act(self.gate_proj(hidden_states))
 
@@ -264,7 +261,6 @@ class FlaxMistralAttention(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        print('dtype(attn): ', self.dtype)
         config = self.config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -422,10 +418,8 @@ class FlaxMistralDecoderLayer(nn.Module):
     config: MistralConfig
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
-    use_scan_layers: bool = True
 
     def setup(self):
-        print('dtype(layer): ',self. dtype)
         self.input_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
         self.self_attn = FlaxMistralAttention(self.config, dtype=self.dtype, mesh=self.mesh)
         self.post_attention_layernorm = FlaxMistralRMSNorm(self.config, dtype=self.dtype)
@@ -440,7 +434,6 @@ class FlaxMistralDecoderLayer(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
     ):
-        print(hidden_states, attention_mask, position_ids, deterministic, init_cache, output_attentions)
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
         residual = hidden_states
@@ -467,9 +460,7 @@ class FlaxMistralDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
-        print(hidden_states)
-
-        return (hidden_states, None) if self.use_scan_layers else (hidden_states,) + outputs[1:]
+        return (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mistral, GPT_NEO->MISTRAL, transformer->model
@@ -493,7 +484,6 @@ class FlaxMistralPreTrainedModel(FlaxPreTrainedModel):
         _do_init: bool = True,
         **kwargs,
     ):
-        print('dtype: ', dtype)
         module = self.module_class(config=config, dtype=dtype, mesh=mesh, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
@@ -614,45 +604,13 @@ class FlaxMistralLayerCollection(nn.Module):
     config: MistralConfig
     mesh: jax.sharding.Mesh
     dtype: jnp.dtype = jnp.float32
-    use_scan_layers: bool = True
-
-    # From maxtext/MaxText/layers/models.py, adapted for transformers
-    # apache 2.0
-    def scan_decoder_layers(self, decoder_layer, length, metdata_axis_name, mesh):
-        initializing = self.is_mutable_collection("params")
-        params_spec = 1 if initializing else nn.partitioning.ScanIn(1)
-        scan_fn = nn.scan(
-            decoder_layer,
-            variable_axes={
-                "params": params_spec
-            },
-            split_rngs={
-                "params": True,
-                "dropout": self.config.attention_dropout != 0.0,
-            },
-            in_axes=(
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),
-            length=length,
-            metadata_params={nn.PARTITION_NAME: metdata_axis_name},
-        )
-
-        return scan_fn(self.config, dtype=self.dtype, name="layers", mesh=mesh, use_scan_layers=self.use_scan_layers)
 
     def setup(self):
-        print('dtype(layercollection): ', self.dtype)
-        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims, prevent_cse=not self.use_scan_layers)
-        if self.use_scan_layers:
-            self.blocks = [self.scan_decoder_layers(FlaxMistralCheckpointLayer, self.config.num_hidden_layers, "layers", self.mesh)]
-        else:
-            self.blocks = [
-                FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh, use_scan_layers=self.use_scan_layers)
-                for i in range(self.config.num_hidden_layers)
-            ]
+        FlaxMistralCheckpointLayer = partitioning.remat(FlaxMistralDecoderLayer, static_argnums=(3, 4, 5), policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
+        self.blocks = [
+            FlaxMistralCheckpointLayer(self.config, dtype=self.dtype, name=str(i), mesh=self.mesh)
+            for i in range(self.config.num_hidden_layers)
+        ]
 
     def __call__(
         self,
@@ -665,10 +623,13 @@ class FlaxMistralLayerCollection(nn.Module):
         output_hidden_states: bool = False,
         return_dict: bool = False,
     ):
-        if output_attentions or output_hidden_states: assert False, 'not implemented'
+        all_attentions = () if output_attentions else None
+        all_hidden_states = () if output_hidden_states else None
 
-        if self.use_scan_layers:
-            layer_outputs, _ = self.blocks[0](
+        for block in self.blocks:
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+            layer_outputs = block(
                 hidden_states,
                 attention_mask,
                 position_ids,
@@ -676,21 +637,13 @@ class FlaxMistralLayerCollection(nn.Module):
                 init_cache,
                 output_attentions,
             )
-            hidden_states = layer_outputs
-        else:
-            for block in self.blocks:
-                layer_outputs = block(
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    deterministic,
-                    init_cache,
-                    output_attentions,
-                )
-                hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs[0]
+
+            if output_attentions:
+                all_attentions += (layer_outputs[1],)
 
         # this contains possible `None` values - `FlaxMistralModule` will filter them out
-        outputs = hidden_states, None, None
+        outputs = (hidden_states, all_hidden_states, all_attentions)
 
         return outputs
 
@@ -740,20 +693,19 @@ class FlaxMistralModule(nn.Module):
         hidden_states = outputs[0]
         hidden_states = self.norm(hidden_states)
 
-        # if output_hidden_states:
-        #     all_hidden_states = outputs[1] + (hidden_states,)
-        #     outputs = (hidden_states, all_hidden_states) + outputs[2:]
-        # else:
-        #     outputs = (hidden_states,) + outputs[1:]
+        if output_hidden_states:
+            all_hidden_states = outputs[1] + (hidden_states,)
+            outputs = (hidden_states, all_hidden_states) + outputs[2:]
+        else:
+            outputs = (hidden_states,) + outputs[1:]
 
         if not return_dict:
-            return hidden_states, None, None
-            # return tuple(v for v in outputs if v is not None)
+            return tuple(v for v in outputs if v is not None)
 
         return FlaxBaseModelOutput(
             last_hidden_state=hidden_states,
-            # hidden_states=outputs[1],
-            # attentions=outputs[-1],
+            hidden_states=outputs[1],
+            attentions=outputs[-1],
         )
 
 
