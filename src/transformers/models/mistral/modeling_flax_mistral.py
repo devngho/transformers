@@ -466,7 +466,7 @@ class FlaxMistralDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, (BATCH, LENGTH, EMBED))
 
-        return ((hidden_states,) + outputs[1:], None) if self.use_scan_layers else (hidden_states,) + outputs[1:]
+        return (hidden_states, None) if self.use_scan_layers else (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mistral, GPT_NEO->MISTRAL, transformer->model
