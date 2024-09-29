@@ -224,7 +224,7 @@ class FlaxMistralMLP(nn.Module):
         embed_dim = self.config.hidden_size
         inner_dim = self.config.intermediate_size if self.config.intermediate_size is not None else 4 * embed_dim
 
-        kernel_init = jax.nn.initializers.normal(self.config.initializer_range)
+        kernel_init = jax.nn.initializers.normal(self.config.initializer_range, dtype=self.dtype)
         self.act = ACT2FN[self.config.hidden_act]
 
         self.gate_proj = nn.Dense(inner_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=kernel_init)
@@ -740,7 +740,7 @@ class FlaxMistralForCausalLMModule(nn.Module):
             use_bias=False,
             dtype=self.dtype,
             param_dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range, dtype=self.dtype),
         )
 
     def __call__(
