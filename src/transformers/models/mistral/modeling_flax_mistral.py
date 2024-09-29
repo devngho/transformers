@@ -271,10 +271,12 @@ class FlaxMistralAttention(nn.Module):
         self.attention_softmax_in_fp32 = self.dtype is not jnp.float32
         self.rope_theta = config.rope_theta
 
-        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype)
-        self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype)
-        self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype)
-        self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype, param_dtype=self.dtype)
+        proj_init = nn.initializers.lecun_normal(dtype=self.dtype) # jax default dense initializers with dtype
+
+        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=proj_init)
+        self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=proj_init)
+        self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=proj_init)
+        self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype, param_dtype=self.dtype, kernel_init=proj_init)
 
         self.rotary_emb = FlaxMistralRotaryEmbedding(config, dtype=self.dtype)
 
@@ -656,7 +658,7 @@ class FlaxMistralModule(nn.Module):
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
-        embedding_init = jax.nn.initializers.normal(stddev=self.config.initializer_range)
+        embedding_init = jax.nn.initializers.normal(stddev=self.config.initializer_range, dtype=self.dtype)
         self.embed_tokens = nn.Embed(
             self.config.vocab_size,
             self.hidden_size,
